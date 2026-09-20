@@ -1,6 +1,6 @@
 """数据库:async engine 与会话工厂。
 
-模型见 models.py;schema 由 Alembic 管理(alembic/ 目录),启动时不再自动建表。
+模型见 models/ 包;schema 由 Alembic 管理(alembic/ 目录),启动时不再自动建表。
 """
 
 from sqlalchemy import make_url
