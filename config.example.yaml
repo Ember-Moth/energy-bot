@@ -14,6 +14,17 @@ webhook:                     # Telegram 推送更新的公网 HTTPS 端点
   secret_token: ""           # 留空 = 每次启动自动生成(仅本次有效);固定则填随机串:
                              #   python -c "import secrets; print(secrets.token_urlsafe(32))"
 
+database:                    # PostgreSQL(SQLAlchemy async + asyncpg)
+  address: localhost         # 主机
+  port: 5432                 # 端口
+  username: energy_bot       # 用户名
+  password: ""               # 密码;建议环境变量注入不落盘:ENERGY_BOT_DATABASE__PASSWORD
+  database: energy_bot       # 库名
+  pool_size: 5               # 连接池常驻连接数
+  max_overflow: 10           # 峰值时允许的超额连接数
+  # DSN 只允许环境变量:ENERGY_BOT_DATABASE__DSN(设置后优先生效);
+  # 配置文件里禁止出现 dsn 字段,请使用上面的离散字段
+
 logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL
   log_dir: ""                # 日志文件目录;空 = 只输出 stdout(systemd 部署收入 journald)

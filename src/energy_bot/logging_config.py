@@ -11,9 +11,11 @@ import json
 import logging
 import logging.handlers
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
+
+from energy_bot.config import TIMEZONE
 
 
 class JSONFormatter(logging.Formatter):
@@ -21,7 +23,7 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, str] = {
-            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+            "ts": datetime.fromtimestamp(record.created, tz=TIMEZONE).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),

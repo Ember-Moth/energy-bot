@@ -61,6 +61,9 @@ After=network-online.target
 
 [Service]
 User=energy-bot
+# 密钥用环境变量注入,不落盘
+Environment=ENERGY_BOT_DATABASE__PASSWORD=CHANGE_ME
+ExecStartPre=/opt/energy-bot/.venv/bin/alembic -c /opt/energy-bot/alembic.ini upgrade head
 ExecStart=/opt/energy-bot/.venv/bin/energy-bot --config /etc/energy-bot/config.yaml
 Restart=on-failure
 RestartSec=5

@@ -1,27 +1,35 @@
 import json
 import logging
 import os
+from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.orm import selectinload
 
 from energy_bot.config import (
+    TIMEZONE,
+    DatabaseSettings,
     Settings,
     WebhookSettings,
     default_config_path,
     load_settings,
     resolve_config_path,
 )
+from energy_bot.db import create_engine_from_dsn, create_session_factory
 from energy_bot.handlers import routers
 from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.logging import LoggingMiddleware
+from energy_bot.models import Base, Order, OrderStatus, User
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """隔离环境变量,避免 ENERGY_BOT_* 覆盖影响其他用例。"""
+    """隔离环境变量,避免 ENERGY_BOT_* 覆盖影响其他用例(测试 DSN 除外)。"""
     for key in list(os.environ):
-        if key.startswith("ENERGY_BOT_"):
+        if key.startswith("ENERGY_BOT_") and key != "ENERGY_BOT_TEST_DSN":
             monkeypatch.delenv(key)
 
 
@@ -112,6 +120,61 @@ def test_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.webhook.base_url == "https://example.com"  # 未覆盖字段保持 YAML 值
 
 
+def test_load_settings_database_discrete_fields(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        "bot_token: abc\n"
+        "webhook:\n"
+        "  base_url: https://example.com\n"
+        "database:\n"
+        "  address: localhost\n"
+        "  username: u\n"
+        "  password: p@ss:word\n"
+        "  database: energy_bot\n"
+        "  max_overflow: 20\n",
+    )
+    database = load_settings(config).database
+    # 特殊字符密码会被转义,不会破坏连接串
+    assert database.effective_dsn() == "postgresql://u:p%40ss%3Aword@localhost:5432/energy_bot"
+    assert database.pool_size == 5  # 未配置用默认
+    assert database.max_overflow == 20
+
+
+def test_env_dsn_takes_priority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _write_config(
+        tmp_path,
+        "database:\n  address: localhost\n  username: u\n  database: db\n",
+    )
+    monkeypatch.setenv("ENERGY_BOT_DATABASE__DSN", "postgres://from-env:5432/db")
+    assert load_settings(config).database.effective_dsn() == "postgres://from-env:5432/db"
+
+
+def test_dsn_in_yaml_rejected(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, "database:\n  dsn: postgresql://u@h/db\n")
+    with pytest.raises(SystemExit):
+        load_settings(config)
+
+
+def test_invalid_env_dsn_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _write_config(
+        tmp_path, "database:\n  address: localhost\n  username: u\n  database: db\n"
+    )
+    monkeypatch.setenv("ENERGY_BOT_DATABASE__DSN", "mysql://bad")
+    with pytest.raises(SystemExit):
+        load_settings(config)
+
+
+def test_incomplete_database_effective_dsn_raises() -> None:
+    with pytest.raises(ValueError, match="address/username/database"):
+        DatabaseSettings().effective_dsn()
+
+
+def test_project_timezone_is_utc_plus_8() -> None:
+    # 东八区无夏令时,任意时刻偏移恒为 +8
+    assert TIMEZONE.utcoffset(datetime(2026, 1, 1, tzinfo=TIMEZONE)) == timedelta(hours=8)
+    assert TIMEZONE.utcoffset(datetime(2026, 7, 1, tzinfo=TIMEZONE)) == timedelta(hours=8)
+
+
 def test_missing_config_file_exits(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         load_settings(tmp_path / "config.yaml")
@@ -145,6 +208,42 @@ def test_invalid_log_level_exits(tmp_path: Path) -> None:
     )
     with pytest.raises(SystemExit):
         load_settings(config)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ENERGY_BOT_TEST_DSN"),
+    reason="需要 ENERGY_BOT_TEST_DSN 指向可用的 PostgreSQL(测试库,数据会被清空)",
+)
+async def test_models_roundtrip() -> None:
+    engine = create_engine_from_dsn(os.environ["ENERGY_BOT_TEST_DSN"])
+    async with engine.connect() as conn:
+        tz = (await conn.execute(text("SELECT current_setting('TimeZone')"))).scalar_one()
+        assert tz == "Asia/Shanghai"  # 连接时区与项目统一(东八区)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    factory = create_session_factory(engine)
+    async with factory() as session:
+        session.add(User(id=1, first_name="测试", language_code="zh"))
+        await session.flush()
+        session.add(
+            Order(
+                user_id=1,
+                recipient_address="TBase1ExampleAddressDoNotUseXxx",
+                energy_amount=65000,
+                duration_hours=1,
+                price=Decimal("1.5"),
+                status=OrderStatus.DRAFT,
+            )
+        )
+        await session.commit()
+    async with factory() as session:
+        stmt = select(Order).options(selectinload(Order.user))  # async 下禁止懒加载,显式预加载
+        order = (await session.execute(stmt)).scalar_one()
+        assert order.user.first_name == "测试"
+        assert order.price == Decimal("1.5")
+        assert order.status is OrderStatus.DRAFT
+    await engine.dispose()
 
 
 def test_setup_logging_json_to_stdout_and_file(tmp_path: Path) -> None:

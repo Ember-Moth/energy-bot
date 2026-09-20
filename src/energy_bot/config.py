@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 import yaml
 from platformdirs import user_config_dir
@@ -19,6 +21,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 DEFAULT_CONFIG_NAME = "config.yaml"
 CONFIG_ENV = "ENERGY_BOT_CONFIG"
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+TIMEZONE = ZoneInfo("Asia/Shanghai")  # 项目与数据库统一时区(东八区)
 
 
 def default_config_path() -> Path:
@@ -53,8 +56,9 @@ class WebhookSettings(BaseSettings):
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, value: str) -> str:
+        # 允许留空:迁移等场景只需要 database 段,必填在启动时检查
         value = value.strip().rstrip("/")
-        if not value.startswith("https://"):
+        if value and not value.startswith("https://"):
             raise ValueError("必须是 https:// 开头的公网地址,如 https://bot.example.com")
         return value
 
@@ -63,6 +67,44 @@ class WebhookSettings(BaseSettings):
     def validate_path(cls, value: str) -> str:
         value = value.strip() or "/webhook"
         return value if value.startswith("/") else f"/{value}"
+
+
+class DatabaseSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_DATABASE_")
+
+    address: str = ""  # 主机
+    port: int = Field(default=5432, ge=1, le=65535)
+    username: str = ""
+    # 建议用环境变量注入,不落盘:ENERGY_BOT_DATABASE__PASSWORD
+    password: str = ""
+    database: str = ""
+    pool_size: int = Field(default=5, ge=1)  # 连接池常驻连接数
+    max_overflow: int = Field(default=10, ge=0)  # 峰值时允许的超额连接数
+    # 完整连接串,只允许环境变量(ENERGY_BOT_DATABASE__DSN),设置后优先生效;
+    # 配置文件里禁止出现 dsn 字段(load_settings 会拒绝)
+    dsn: str = ""
+
+    @field_validator("dsn")
+    @classmethod
+    def validate_dsn(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith(("postgresql://", "postgres://")):
+            raise ValueError("必须是 postgresql:// 开头的连接串")
+        return value
+
+    def effective_dsn(self) -> str:
+        """环境变量 DSN 优先;否则由离散字段拼装(用户名/密码自动转义)。"""
+        if self.dsn:
+            return self.dsn
+        if not (self.address and self.username and self.database):
+            raise ValueError(
+                "需配置 address/username/database,"
+                "或用环境变量 ENERGY_BOT_DATABASE__DSN 提供完整连接串"
+            )
+        auth = quote_plus(self.username)
+        if self.password:
+            auth += f":{quote_plus(self.password)}"
+        return f"postgresql://{auth}@{self.address}:{self.port}/{self.database}"
 
 
 class LoggingSettings(BaseSettings):
@@ -86,6 +128,7 @@ class Settings(BaseSettings):
 
     bot_token: str = ""  # @BotFather 的 bot token;或设 ENERGY_BOT_BOT_TOKEN
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @classmethod
@@ -113,6 +156,16 @@ def load_settings(path: Path | None = None) -> Settings:
         data: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise SystemExit(f"配置文件 {path} 不是合法的 YAML:\n{exc}") from exc
+    if (
+        isinstance(data, dict)
+        and isinstance(data.get("database"), dict)
+        and "dsn" in data["database"]
+    ):
+        raise SystemExit(
+            f"配置文件 {path} 不允许 database.dsn:"
+            "连接串只能通过环境变量 ENERGY_BOT_DATABASE__DSN 提供,"
+            "配置文件里请用 address/username/password/database"
+        )
     try:
         return Settings(**(data if isinstance(data, dict) else {}))
     except ValidationError as exc:

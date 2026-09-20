@@ -22,6 +22,17 @@ bot 是打包安装的应用(控制台命令 `energy-bot`),配置基于 pydantic
 | `webhook.port` | 否 | `8080` | 本地监听端口,取值 1–65535 |
 | `webhook.path` | 否 | `/webhook` | webhook 路径,不以 `/` 开头自动补上;建议用随机串 |
 | `webhook.secret_token` | 否 | 每次启动随机生成 | 请求校验密钥,详见下文 |
+| `database.address` | 是 | 空 | PostgreSQL 主机 |
+| `database.port` | 否 | `5432` | 端口,取值 1–65535 |
+| `database.username` | 是 | 空 | 用户名 |
+| `database.password` | 否 | 空 | 密码;建议用环境变量注入不落盘:`ENERGY_BOT_DATABASE__PASSWORD` |
+| `database.database` | 是 | 空 | 库名 |
+| `database.pool_size` | 否 | `5` | 连接池常驻连接数 |
+| `database.max_overflow` | 否 | `10` | 峰值时允许的超额连接数 |
+
+**DSN 只允许环境变量**:`ENERGY_BOT_DATABASE__DSN` 提供完整连接串(设置后优先生效,适合密钥管理系统统一注入);配置文件里出现 `database.dsn` 会被直接拒绝,文件里请使用上面的离散字段。
+
+**时区**:项目与数据库统一为东八区(`Asia/Shanghai`)——数据库连接通过 `server_settings` 固定时区(`now()` 等返回 +08 时间),日志时间戳同样使用东八区;时间列均为 `TIMESTAMPTZ`。
 | `logging.level` | 否 | `INFO` | 日志级别:`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`,大小写不敏感 |
 | `logging.log_dir` | 否 | 空 | 日志文件目录;空表示只输出 stdout,配了则按天轮转保留 30 天,文件固定 JSON |
 | `logging.json_logs` | 否 | `false` | stdout 是否用 JSON 格式;开发用彩色文本,生产建议开 |
@@ -35,7 +46,7 @@ bot 是打包安装的应用(控制台命令 `energy-bot`),配置基于 pydantic
 - `webhook.base_url` 不是 `https://` 开头(Telegram 强制要求 HTTPS);
 - `webhook.port` 超出 1–65535;
 - `logging.level` 不是合法级别;
-- `bot_token` 为空(在启动时检查)。
+- `bot_token` 为空、`webhook.base_url` 为空、数据库连接信息不完整(均在启动时检查)。
 
 ## secret_token
 

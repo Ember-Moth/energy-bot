@@ -12,8 +12,10 @@ from aiogram.webhook.aiohttp_server import setup_application
 from aiohttp import web
 
 from energy_bot.config import load_settings
+from energy_bot.db import create_engine_from_dsn, create_session_factory
 from energy_bot.handlers import routers
 from energy_bot.logging_config import setup_logging
+from energy_bot.middlewares.db import DbSessionMiddleware
 from energy_bot.middlewares.logging import LoggingMiddleware
 from energy_bot.web.health import register_health_routes
 from energy_bot.web.telegram import register_telegram_routes
@@ -34,6 +36,19 @@ async def amain(config_path: Path | None = None) -> None:
         raise SystemExit(
             "bot_token 未配置:请在 config.yaml 填入 @BotFather 的 token,或设置 ENERGY_BOT_BOT_TOKEN"
         )
+    if not settings.webhook.base_url:
+        raise SystemExit("webhook.base_url 未配置:请填入公网 HTTPS 地址,如 https://bot.example.com")
+
+    try:
+        dsn = settings.database.effective_dsn()
+    except ValueError as exc:
+        raise SystemExit(f"database 配置不完整:{exc}") from exc
+    engine = create_engine_from_dsn(
+        dsn,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
+    session_factory = create_session_factory(engine)
 
     hook = settings.webhook
     secret_token = hook.secret_token or secrets.token_urlsafe(32)
@@ -46,12 +61,15 @@ async def amain(config_path: Path | None = None) -> None:
     )
     dp = Dispatcher()
     dp.message.middleware(LoggingMiddleware())
+    dp.message.middleware(DbSessionMiddleware(session_factory))
     dp.callback_query.middleware(LoggingMiddleware())
+    dp.callback_query.middleware(DbSessionMiddleware(session_factory))
     dp.include_routers(*routers)
 
     stop = asyncio.Event()
     async with AsyncExitStack() as resources:
         resources.push_async_callback(bot.session.close)
+        resources.push_async_callback(engine.dispose)
 
         app = web.Application()
         register_telegram_routes(app, dp, bot, hook.path, secret_token)
