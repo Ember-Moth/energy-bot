@@ -34,7 +34,7 @@ src/energy_bot/
 ├── models/        # ORM 模型包(base / user / order)
 ├── db.py          # async engine 与会话工厂
 ├── repositories/  # 薄数据访问(users / orders)
-├── services/      # 业务工作流(订单状态机)
+├── services/      # 业务工作流(订单状态机);upstream/ 上游客户端(tronow / tronbid)
 ├── handlers/      # 业务路由(start、echo 示例)
 ├── middlewares/   # 中间件(更新日志)
 ├── web/           # HTTP 路由:telegram.py(更新接收)、health.py(健康检查)、tronow.py(上游回调)

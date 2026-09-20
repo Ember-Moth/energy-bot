@@ -32,6 +32,10 @@ upstream:                     # 上游能量供应商
     api_secret: ""            # 请求签名密钥;同上(...API_SECRET),与 webhook 密钥互为独立密钥
     webhook_secret: ""        # 回调验签密钥(X-Lease-Signature);留空则回调端点拒绝一切请求(503)
     timeout_seconds: 10       # 单请求超时(秒)
+  tronbid:                    # TronBid Quick Rent API(无 webhook,纯轮询;快照见 docs/upstream/quick-rent-v2.json)
+    base_url: "https://tronbid.com/api/v2/quick-rent"
+    api_key: ""               # API Key(Authorization: Bearer);建议环境变量注入:ENERGY_BOT_UPSTREAM__TRONBID__API_KEY
+    timeout_seconds: 10       # 单请求超时(秒)
 
 logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL

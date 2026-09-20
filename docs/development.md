@@ -48,12 +48,12 @@ src/energy_bot/
 ├── models/        # ORM 模型包:base.py(Base/TimestampMixin)、user.py、order.py
 ├── db.py          # async engine 与会话工厂(DSN 统一走 asyncpg 驱动)
 ├── repositories/  # 薄数据访问:模块级 async 函数,首参 AsyncSession;无业务规则
-├── services/      # 业务工作流:rental.py 订单状态机与流转;upstream/ 上游客户端(tronow.py)
+├── services/      # 业务工作流:rental.py 订单状态机与流转;upstream/ 上游客户端(tronow.py、tronbid.py)
 ├── handlers/      # 业务路由,新增功能就在这里加模块
 │   ├── start.py   # /start、/help
 │   └── echo.py    # 示例:回显文本消息
 ├── middlewares/   # 中间件(当前:更新日志)
-├── web/           # HTTP 路由:telegram.py(更新接收,密钥校验)、health.py(/healthz)
+├── web/           # HTTP 路由:telegram.py(更新接收,密钥校验)、health.py(/healthz)、tronow.py(上游回调验签)
 └── keyboards/     # 键盘定义
 tests/             # pytest 测试
 docs/              # 配置 / 部署 / 开发 / 提交规范文档

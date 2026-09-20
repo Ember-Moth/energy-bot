@@ -117,10 +117,19 @@ class TronowSettings(BaseSettings):
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
 
 
+class TronbidSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_TRONBID_")
+
+    base_url: str = "https://tronbid.com/api/v2/quick-rent"
+    api_key: str = ""  # API Key(Authorization: Bearer);建议环境变量注入不落盘
+    timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
+
+
 class UpstreamSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_UPSTREAM_")
 
     tronow: TronowSettings = Field(default_factory=TronowSettings)
+    tronbid: TronbidSettings = Field(default_factory=TronbidSettings)
 
 
 class LoggingSettings(BaseSettings):
