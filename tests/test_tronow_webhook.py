@@ -6,10 +6,12 @@ import json
 import os
 import time
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from sqlalchemy import func, select
 
 from energy_bot.config import TronowSettings
 from energy_bot.db import create_engine_from_dsn, create_session_factory
@@ -35,7 +37,7 @@ def _callback_body(
     order_id: str = "ord_x1",
     status: str = "SUCCESS",
     client_order_id: str = "eb-000001",
-    txid: str | None = "tx-hash-1",
+    txid: Any = "tx-hash-1",
 ) -> bytes:
     payload: dict[str, Any] = {
         "event": "order.succeeded",
@@ -214,11 +216,7 @@ async def test_webhook_activates_order_and_dedups(webhook_client) -> None:
         assert order is not None and order.status is OrderStatus.ACTIVE
         assert order.upstream_txid == "tx-hash-1"
         assert order.expires_at is not None
-        deliveries = len(
-            (await session.execute(__import__("sqlalchemy").select(UpstreamDelivery)))
-            .scalars()
-            .all()
-        )
+        deliveries = len((await session.execute(select(UpstreamDelivery))).scalars().all())
     assert deliveries == 1
 
     # 相同 delivery 重投:幂等应答,不产生第二条去重记录
@@ -302,11 +300,62 @@ async def test_webhook_ignores_nonterminal_status(webhook_client) -> None:
         assert order is not None and order.status is OrderStatus.DELEGATING
 
 
-async def test_webhook_unmatched_order_still_200(webhook_client) -> None:
-    http, _ = webhook_client
+async def test_webhook_unmatched_order_gets_503_for_redelivery(webhook_client) -> None:
+    http, factory = webhook_client
     resp = await _post(http, _callback_body(order_id="ord_unknown"), delivery="dlv-u1")
-    assert resp.status == 200
+    # 非 2xx 上游才会重投;且不落去重记录,重投时本地落库后即可匹配
+    assert resp.status == 503
     assert (await resp.json())["status"] == "unmatched"
+    async with factory() as session:
+        seen = await session.scalar(
+            select(UpstreamDelivery.delivery_id).where(UpstreamDelivery.delivery_id == "dlv-u1")
+        )
+    assert seen is None
+
+
+async def test_webhook_concurrent_duplicate_answers_duplicate(
+    webhook_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http, factory = webhook_client
+    # 模拟并发:同一 delivery 已被另一请求落库,但本请求的查重没读到(主键冲突兜底)
+    async with factory() as session:
+        session.add(
+            UpstreamDelivery(delivery_id="dlv-race", provider="tronow", event="order.succeeded")
+        )
+        await session.commit()
+    monkeypatch.setattr(TronowWebhookView, "_already_seen", AsyncMock(return_value=False))
+    resp = await _post(http, _callback_body(), delivery="dlv-race")
+    assert resp.status == 200
+    assert (await resp.json())["status"] == "duplicate"
+    async with factory() as session:  # 冲突回滚:业务状态与去重记录都保持不变
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.DELEGATING
+        count = (
+            await session.execute(select(func.count()).select_from(UpstreamDelivery))
+        ).scalar_one()
+    assert count == 1
+
+
+async def test_webhook_nonstring_txid_ignored(webhook_client) -> None:
+    http, factory = webhook_client
+    resp = await _post(http, _callback_body(txid=12345), delivery="dlv-tx")  # 防御:非法类型
+    assert resp.status == 200
+    assert (await resp.json())["status"] == "applied"
+    async with factory() as session:
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.ACTIVE
+        assert order.upstream_txid is None  # 非字符串 txid 不入库,但不阻断流转
+
+
+async def test_webhook_rejects_oversized_body() -> None:
+    app = _build_app(WEBHOOK_SECRET, session_factory=None)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/upstream/tronow/webhook", data=b" " * (70 * 1024))
+        assert resp.status == 413
+    finally:
+        await client.close()
 
 
 async def test_webhook_503_when_secret_missing() -> None:

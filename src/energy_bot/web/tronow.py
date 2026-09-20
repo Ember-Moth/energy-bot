@@ -4,6 +4,8 @@
 读原始字节 → 大小上限 → 时间窗 → 常数时间验签 → 解析 JSON →
 delivery ID 持久化去重 → 行锁匹配订单 → 状态流转 → 落库后才 2xx。
 回调会重复投递:除首次外的投递一律幂等应答 200。
+匹配不到本地订单时应答 503 且不落去重记录——2xx 等于确认送达,
+只有非 2xx 上游才会重投,等本地落库后重投即可匹配。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any
 
 from aiohttp import web
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from energy_bot.config import TronowSettings
@@ -79,8 +82,12 @@ class TronowWebhookView:
             # 未配置密钥时拒绝一切回调,防止误把未验证的请求当真
             return web.json_response({"error": "webhook not configured"}, status=503)
 
+        # 先查声明长度挡掉明显超限的 body(read 会把全部字节拉进内存)
+        declared = request.content_length
+        if declared is not None and declared > _MAX_BODY_BYTES:
+            return web.json_response({"error": "body too large"}, status=413)
         body = await request.read()
-        if len(body) > _MAX_BODY_BYTES:
+        if len(body) > _MAX_BODY_BYTES:  # 无 Content-Length(chunked)时的实际兜底
             return web.json_response({"error": "body too large"}, status=413)
 
         timestamp = request.headers.get("X-Lease-Timestamp", "")
@@ -116,8 +123,16 @@ class TronowWebhookView:
             if await self._already_seen(session, delivery_id):
                 return web.json_response({"status": "duplicate"})
             order_view = await self._apply_event(session, event, payload)
+            if order_view == "unmatched":
+                # 不落去重记录并应答 503:上游按未送达重投,本地落库后重投即匹配
+                return web.json_response({"status": "unmatched"}, status=503)
             session.add(UpstreamDelivery(delivery_id=delivery_id, provider="tronow", event=event))
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # 并发的相同 delivery 抢先落库(主键冲突):业务已幂等,按重复应答
+                await session.rollback()
+                return web.json_response({"status": "duplicate"})
 
         logger.info("TRONow 回调已处理: delivery=%s event=%s", delivery_id, event)
         return web.json_response({"status": order_view})
@@ -134,8 +149,8 @@ class TronowWebhookView:
     async def _apply_event(self, session: AsyncSession, event: str, payload: dict[str, Any]) -> str:
         """匹配订单并流转;返回给 TRONow 的应答视图。
 
-        防御式解析:payload schema 官方未定稿,字段缺失只记日志、不影响 2xx 应答
-        (终态以轮询兜底,误 5xx 只会引来重复投递)。
+        防御式解析:payload schema 官方未定稿,字段缺失或非终态只记日志、
+        应答 "ignored"(2xx);唯独 "unmatched" 交回 handle 应答 503 换取上游重投。
         """
         data = payload.get("data")
         nested = data if isinstance(data, dict) else payload
@@ -158,7 +173,8 @@ class TronowWebhookView:
 
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
         if order is None:
-            # 可能先于本地落库到达;记录后让 TRONow 重投,或等待轮询兜底
+            # 回调先于本地落库到达(或单号对不上):由 handle 应答 503 让上游重投,
+            # 重投时本地记录通常已就绪;仍匹配不上则由轮询兜底
             logger.warning(
                 "TRONow 回调未匹配到订单: upstream_order_id=%s client_order_id=%r",
                 order_id,
@@ -166,9 +182,13 @@ class TronowWebhookView:
             )
             return "unmatched"
 
+        txid_raw = nested.get("txid")
         try:
             await rental.handle_terminal_event(
-                session, order, succeeded=succeeded, upstream_txid=nested.get("txid") or ""
+                session,
+                order,
+                succeeded=succeeded,
+                upstream_txid=txid_raw if isinstance(txid_raw, str) else "",
             )
         except RentalError:
             logger.exception("TRONow 回调流转失败: order=%s", order.id)
