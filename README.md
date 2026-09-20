@@ -28,10 +28,11 @@ uv run python -m energy_bot --config config.yaml  # 等价的模块方式
 src/energy_bot/
 ├── __init__.py    # main() 入口(console script 与 python -m 都指向它)
 ├── __main__.py    # 支持 python -m energy_bot
-├── app.py         # amain():webhook 服务(aiohttp)+ 生命周期
+├── app.py         # amain():装配 Bot/Dispatcher + web 服务,AsyncExitStack 优雅停机
 ├── config.py      # 读取 config.yaml
 ├── handlers/      # 业务路由(start、echo 示例)
 ├── middlewares/   # 中间件(更新日志)
+├── web/           # HTTP 路由:telegram.py(更新接收)、health.py(健康检查)
 └── keyboards/     # 键盘定义
 tests/             # pytest 测试
 docs/              # 文档

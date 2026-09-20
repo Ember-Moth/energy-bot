@@ -8,7 +8,9 @@
 - **打包安装的应用,三层等价入口**:console script `energy-bot`(pyproject `[project.scripts]` → `energy_bot:main`,生产用)、`python -m energy_bot`(`__main__.py`,开发用)、`main()` 本体在 `__init__.py`(解析参数 → 装 uvloop → 驱动 `app.amain`);加独立命令在 `[project.scripts]` 加行指向包内函数;不要引入对工作目录的依赖
 - **webhook 模式**接收更新(aiohttp `SimpleRequestHandler` 承载),不使用 long polling
 - 全异步;事件循环固定使用 uvloop(仅支持 macOS / Linux,不考虑 Windows)
-- 配置默认从平台用户配置目录读取(`platformdirs`,见 `config.py` 的 `default_config_path`),`--config` 参数可指定;不使用环境变量 / .env
+- **配置系统**(pydantic-settings):YAML 为主,`ENERGY_BOT_` 前缀环境变量可覆盖(嵌套键用 `__`,如 `ENERGY_BOT_WEBHOOK__PORT`);路径解析:`--config` 参数 > `ENERGY_BOT_CONFIG` 环境变量 > `platformdirs` 平台默认目录;不用 .env 文件
+- **日志系统**(`logging_config.py`):stdout 彩色开发格式 / JSON 生产格式(`logging.json_logs`),配置 `logging.log_dir` 则按天轮转保留 30 天(文件固定 JSON);JSON 字段为 `ts/level/logger/msg`
+- **优雅停机**:`app.py` 的 `amain()` 用 `AsyncExitStack` 管理资源,注册 SIGTERM 处理器触发停机,退出栈按 LIFO 清理(delete_webhook → aiohttp 下线 → bot 会话关闭)
 
 ## 常用命令
 
@@ -30,10 +32,12 @@ uv run cz commit                   # 按 Conventional Commits 交互式提交
 src/energy_bot/
 ├── __init__.py    # main() 入口本体(解析参数 → 装 uvloop → 驱动 app.amain)
 ├── __main__.py    # 支持 python -m energy_bot
-├── app.py         # amain():webhook 注册、aiohttp 服务与生命周期(on_startup/on_shutdown)
-├── config.py      # load_settings() 解析并校验 config.yaml,失败以 SystemExit 提示
+├── app.py         # amain():装配 Bot/Dispatcher/web 服务,AsyncExitStack + SIGTERM 优雅停机
+├── config.py      # pydantic-settings 模型与 load_settings(),校验失败以 SystemExit 提示
+├── logging_config.py # 日志:彩色开发格式 / JSON 生产格式,按天轮转
 ├── handlers/      # 每个 Router 一个模块,在 __init__.py 的 routers 元组按优先级注册
 ├── middlewares/   # aiogram 中间件
+├── web/           # HTTP 路由:telegram.py(更新接收,密钥校验)、health.py(/healthz)
 └── keyboards/     # 键盘定义
 tests/             # pytest;pytest-asyncio auto 模式,async 测试直接写
 docs/              # 配置 / 部署 / 开发 / 提交规范文档

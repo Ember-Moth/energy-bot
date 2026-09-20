@@ -19,12 +19,13 @@ uv run energy-bot --config config.yaml  # 开发时指向仓库内配置
 src/energy_bot/
 ├── __init__.py    # main():入口本体(解析参数 → 装 uvloop → 驱动 app.amain)
 ├── __main__.py    # 支持 python -m energy_bot
-├── app.py         # amain():webhook 注册、aiohttp 服务与生命周期
+├── app.py         # amain():装配 Bot/Dispatcher/web 服务,AsyncExitStack + SIGTERM 优雅停机
 ├── config.py      # 配置解析与校验(默认平台配置目录,--config 可覆盖)
 ├── handlers/      # 业务路由,新增功能就在这里加模块
 │   ├── start.py   # /start、/help
 │   └── echo.py    # 示例:回显文本消息
 ├── middlewares/   # 中间件(当前:更新日志)
+├── web/           # HTTP 路由:telegram.py(更新接收,密钥校验)、health.py(/healthz)
 └── keyboards/     # 键盘定义
 tests/             # pytest 测试
 docs/              # 配置 / 部署 / 开发 / 提交规范文档

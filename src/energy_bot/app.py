@@ -1,33 +1,43 @@
 import asyncio
 import logging
 import secrets
-from dataclasses import replace
+import signal
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import setup_application
 from aiohttp import web
 
 from energy_bot.config import load_settings
 from energy_bot.handlers import routers
-from energy_bot.logging_setup import setup_logging
+from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.logging import LoggingMiddleware
+from energy_bot.web.health import register_health_routes
+from energy_bot.web.telegram import register_telegram_routes
 
 logger = logging.getLogger(__name__)
 
 
 async def amain(config_path: Path | None = None) -> None:
-    """异步主体:加载配置、初始化日志、注册 webhook、启动 aiohttp 服务并挂起。"""
+    """异步主体:加载配置、初始化日志、装配 webhook 服务并优雅挂起。"""
     settings = load_settings(config_path)
-    setup_logging(settings.log)
+    setup_logging(
+        level=settings.logging.level,
+        log_dir=settings.logging.log_dir or None,
+        json_logs=settings.logging.json_logs,
+    )
     logger.info("事件循环: %s", type(asyncio.get_running_loop()).__module__)
-    if not settings.webhook.secret_token:
-        settings = replace(
-            settings,
-            webhook=replace(settings.webhook, secret_token=secrets.token_urlsafe(32)),
+    if not settings.bot_token:
+        raise SystemExit(
+            "bot_token 未配置:请在 config.yaml 填入 @BotFather 的 token,或设置 ENERGY_BOT_BOT_TOKEN"
         )
+
+    hook = settings.webhook
+    secret_token = hook.secret_token or secrets.token_urlsafe(32)
+    if not hook.secret_token:
         logger.info("webhook.secret_token 未配置,已自动生成(仅本次启动有效)")
 
     bot = Bot(
@@ -39,42 +49,35 @@ async def amain(config_path: Path | None = None) -> None:
     dp.callback_query.middleware(LoggingMiddleware())
     dp.include_routers(*routers)
 
-    async def on_startup(hook_bot: Bot) -> None:
-        hook = settings.webhook
-        await hook_bot.set_webhook(
-            f"{hook.base_url}{hook.path}",
-            secret_token=hook.secret_token,
+    stop = asyncio.Event()
+    async with AsyncExitStack() as resources:
+        resources.push_async_callback(bot.session.close)
+
+        app = web.Application()
+        register_telegram_routes(app, dp, bot, hook.path, secret_token)
+        register_health_routes(app)
+        setup_application(app, dp, bot=bot)
+
+        runner = web.AppRunner(app, access_log=None)  # 访问日志交给 LoggingMiddleware,避免刷屏
+        resources.push_async_callback(runner.cleanup)
+        await runner.setup()
+        await web.TCPSite(runner, host=hook.host, port=hook.port).start()
+
+        webhook_url = f"{hook.base_url}{hook.path}"
+        await bot.set_webhook(
+            webhook_url,
+            secret_token=secret_token,
             drop_pending_updates=True,
         )
-        logger.info("webhook 已设置: %s%s", hook.base_url, hook.path)
+        resources.push_async_callback(bot.delete_webhook)
+        logger.info("webhook 已注册: %s", webhook_url)
+        logger.info("监听 %s:%d%s", hook.host, hook.port, hook.path)
 
-    async def on_shutdown(hook_bot: Bot) -> None:
-        await hook_bot.delete_webhook(drop_pending_updates=True)
-        await hook_bot.session.close()
-        logger.info("webhook 已移除,bot 会话已关闭")
+        # SIGTERM(systemd stop)→ 触发优雅停机;退出栈按 LIFO 清理:
+        # delete_webhook → aiohttp 下线(dp.shutdown)→ bot 会话关闭
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, stop.set)
+        resources.callback(loop.remove_signal_handler, signal.SIGTERM)
 
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    async def health(_: web.Request) -> web.Response:
-        return web.Response(text="ok")
-
-    app = web.Application()
-    app.router.add_get("/healthz", health)
-    SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-        secret_token=settings.webhook.secret_token,
-    ).register(app, path=settings.webhook.path)
-    setup_application(app, dp, bot=bot)
-
-    runner = web.AppRunner(app, access_log=None)  # 访问日志交给 LoggingMiddleware,避免刷屏
-    await runner.setup()
-    hook = settings.webhook
-    site = web.TCPSite(runner, host=hook.host, port=hook.port)
-    await site.start()
-    logger.info("HTTP 服务已启动: http://%s:%s%s", hook.host, hook.port, hook.path)
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await runner.cleanup()
+        await stop.wait()
+    logger.info("已优雅停机")

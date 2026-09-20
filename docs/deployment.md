@@ -19,7 +19,7 @@ ngrok http 8080
 uv run energy-bot
 ```
 
-验证:服务日志出现 `webhook 已设置`,`curl http://127.0.0.1:8080/healthz` 返回 `ok`。
+验证:服务日志出现 `webhook 已注册`,`curl http://127.0.0.1:8080/healthz` 返回 `{"status":"alive"}`。
 
 ## 生产部署
 
@@ -69,12 +69,14 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-应用是打包安装的,不依赖工作目录;配置统一放 `/etc/energy-bot/config.yaml` 并用 `--config` 指定。
+应用是打包安装的,不依赖工作目录;配置统一放 `/etc/energy-bot/config.yaml` 并用 `--config` 指定,也可用 `ENERGY_BOT_CONFIG` 环境变量指定路径。
+
+`systemctl stop` 发送 SIGTERM,应用注册了信号处理器优雅停机:注销 webhook → aiohttp 下线 → 关闭 bot 会话,之后才退出。
 
 ## 注意事项
 
-- **健康检查**:`GET /healthz` 返回 `ok`,可用于负载均衡探活;
-- **日志**:默认输出到 stderr,systemd 自动收入 journald(`journalctl -u energy-bot`);需要落盘文件时配置 `log.file`,自带按大小滚动,详见[配置说明](configuration.md);
-- **滚动重启**:退出时会 `delete_webhook`,重启间隙消息会短暂中断;如需零停机部署,注释掉 `app.py` 中 `on_shutdown` 里的 `delete_webhook` 调用;
+- **健康检查**:`GET /healthz` 返回 `{"status":"alive"}`,可用于负载均衡探活;
+- **日志**:默认输出到 stdout,systemd 自动收入 journald(`journalctl -u energy-bot`);需要落盘文件时配置 `logging.log_dir`,按天轮转保留 30 天,文件固定 JSON 格式,详见[配置说明](configuration.md);
+- **滚动重启**:停机时会 `delete_webhook`,重启间隙消息会短暂中断;如需零停机部署,把 `app.py` 退出栈里的 `push_async_callback(bot.delete_webhook)` 一行去掉;
 - **`webhook.path`**:Telegram 允许任意路径,改成随机串可以在密钥校验之外多一层防护;
 - **set_webhook 覆盖**:同一个 bot 只有一个 webhook,重复启动新实例会覆盖旧地址。

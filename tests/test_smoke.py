@@ -1,3 +1,6 @@
+import json
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -7,23 +10,30 @@ from energy_bot.config import (
     WebhookSettings,
     default_config_path,
     load_settings,
+    resolve_config_path,
 )
 from energy_bot.handlers import routers
-from energy_bot.logging_setup import setup_logging
+from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.logging import LoggingMiddleware
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离环境变量,避免 ENERGY_BOT_* 覆盖影响其他用例。"""
+    for key in list(os.environ):
+        if key.startswith("ENERGY_BOT_"):
+            monkeypatch.delenv(key)
+
+
+def _write_config(tmp_path: Path, body: str) -> Path:
+    config = tmp_path / "config.yaml"
+    config.write_text(body, encoding="utf-8")
+    return config
 
 
 def test_routers_registered() -> None:
     names = {router.name for router in routers}
     assert {"start", "echo"} <= names
-
-
-def test_settings_holds_token() -> None:
-    settings = Settings(
-        bot_token="abc",
-        webhook=WebhookSettings(base_url="https://example.com"),
-    )
-    assert settings.bot_token == "abc"
 
 
 async def test_logging_middleware_passes_event_through() -> None:
@@ -37,34 +47,12 @@ async def test_logging_middleware_passes_event_through() -> None:
     assert seen == [("event", {"k": 1})]
 
 
-def test_load_settings_reads_webhook(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "bot_token: abc\n"
-        "webhook:\n"
-        "  base_url: https://example.com/\n"
-        "  port: 9443\n"
-        "  secret_token: s3cret\n",
-        encoding="utf-8",
+def test_settings_direct_construction() -> None:
+    settings = Settings(
+        bot_token="abc",
+        webhook=WebhookSettings(base_url="https://example.com"),
     )
-    settings = load_settings(config)
     assert settings.bot_token == "abc"
-    assert settings.webhook.base_url == "https://example.com"  # 去掉尾部斜杠
-    assert settings.webhook.port == 9443
-    assert settings.webhook.secret_token == "s3cret"
-
-
-def test_load_settings_webhook_defaults(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "bot_token: abc\nwebhook:\n  base_url: https://example.com\n",
-        encoding="utf-8",
-    )
-    webhook = load_settings(config).webhook
-    assert webhook.host == "0.0.0.0"
-    assert webhook.port == 8080
-    assert webhook.path == "/webhook"
-    assert webhook.secret_token == ""
 
 
 def test_default_config_path_in_user_config_dir() -> None:
@@ -73,65 +61,55 @@ def test_default_config_path_in_user_config_dir() -> None:
     assert "energy-bot" in path.parts
 
 
-def test_load_settings_log_defaults(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "bot_token: abc\nwebhook:\n  base_url: https://example.com\n",
-        encoding="utf-8",
-    )
-    log = load_settings(config).log
-    assert log.level == "INFO"
-    assert log.file == ""
-    assert log.file_max_bytes == 10 * 1024 * 1024
-    assert log.file_backup_count == 5
+def test_resolve_config_path_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    explicit = tmp_path / "explicit.yaml"
+    assert resolve_config_path(explicit) == explicit  # --config 参数最优先
+    monkeypatch.setenv("ENERGY_BOT_CONFIG", "/from/env.yaml")
+    assert resolve_config_path(explicit) == explicit  # 参数仍优先于环境变量
+    assert resolve_config_path() == Path("/from/env.yaml")  # 环境变量优先于平台默认
+    monkeypatch.delenv("ENERGY_BOT_CONFIG")
+    assert resolve_config_path() == default_config_path()
 
 
-def test_load_settings_log_parsing(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
+def test_load_settings_defaults(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, "bot_token: abc\nwebhook:\n  base_url: https://example.com\n")
+    settings = load_settings(config)
+    assert settings.bot_token == "abc"
+    assert settings.webhook.host == "127.0.0.1"
+    assert settings.webhook.port == 8080
+    assert settings.webhook.path == "/webhook"
+    assert settings.webhook.secret_token == ""
+    assert settings.logging.level == "INFO"
+    assert settings.logging.log_dir == ""
+    assert settings.logging.json_logs is False
+
+
+def test_load_settings_normalizes_values(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
         "bot_token: abc\n"
         "webhook:\n"
-        "  base_url: https://example.com\n"
-        "log:\n"
+        "  base_url: https://example.com/\n"
+        "  path: hook\n"
+        "logging:\n"
         "  level: debug\n"
-        "  file: /tmp/energy-bot.log\n",
-        encoding="utf-8",
+        "  json_logs: true\n",
     )
-    log = load_settings(config).log
-    assert log.level == "DEBUG"  # 大小写不敏感,统一为大写
-    assert log.file == "/tmp/energy-bot.log"
+    settings = load_settings(config)
+    assert settings.webhook.base_url == "https://example.com"  # 去掉尾部斜杠
+    assert settings.webhook.path == "/hook"  # 自动补 /
+    assert settings.logging.level == "DEBUG"  # 统一为大写
+    assert settings.logging.json_logs is True
 
 
-def test_invalid_log_level_exits(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "bot_token: abc\nwebhook:\n  base_url: https://example.com\nlog:\n  level: VERBOSE\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(SystemExit):
-        load_settings(config)
-
-
-def test_setup_logging_applies_level_and_writes_file(tmp_path: Path) -> None:
-    import logging
-
-    from energy_bot.config import LogSettings
-
-    root = logging.getLogger()
-    old_level, old_handlers = root.level, root.handlers[:]
-    log_file = tmp_path / "logs" / "bot.log"  # 父目录不存在,应自动创建
-    try:
-        setup_logging(LogSettings(level="DEBUG", file=str(log_file)))
-        assert root.level == logging.DEBUG
-        logging.getLogger("t").debug("hello")
-        for handler in root.handlers:
-            handler.flush()
-        assert "hello" in log_file.read_text(encoding="utf-8")
-    finally:
-        for handler in root.handlers:
-            handler.close()
-        root.setLevel(old_level)
-        root.handlers[:] = old_handlers
+def test_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _write_config(tmp_path, "bot_token: abc\nwebhook:\n  base_url: https://example.com\n")
+    monkeypatch.setenv("ENERGY_BOT_WEBHOOK__PORT", "9443")
+    monkeypatch.setenv("ENERGY_BOT_LOGGING__LEVEL", "warning")
+    settings = load_settings(config)
+    assert settings.webhook.port == 9443
+    assert settings.logging.level == "WARNING"
+    assert settings.webhook.base_url == "https://example.com"  # 未覆盖字段保持 YAML 值
 
 
 def test_missing_config_file_exits(tmp_path: Path) -> None:
@@ -139,17 +117,52 @@ def test_missing_config_file_exits(tmp_path: Path) -> None:
         load_settings(tmp_path / "config.yaml")
 
 
-def test_missing_base_url_exits(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("bot_token: abc\n", encoding="utf-8")
+def test_invalid_yaml_exits(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, "bot_token: [unclosed\n")
     with pytest.raises(SystemExit):
         load_settings(config)
 
 
-def test_missing_token_exits_cleanly(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        'bot_token: ""\nwebhook:\n  base_url: https://example.com\n', encoding="utf-8"
+def test_invalid_base_url_exits(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, "bot_token: abc\nwebhook:\n  base_url: http://example.com\n")
+    with pytest.raises(SystemExit):
+        load_settings(config)
+
+
+def test_invalid_port_exits(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        "bot_token: abc\nwebhook:\n  base_url: https://example.com\n  port: 99999\n",
     )
     with pytest.raises(SystemExit):
         load_settings(config)
+
+
+def test_invalid_log_level_exits(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        "bot_token: abc\nwebhook:\n  base_url: https://example.com\nlogging:\n  level: VERBOSE\n",
+    )
+    with pytest.raises(SystemExit):
+        load_settings(config)
+
+
+def test_setup_logging_json_to_stdout_and_file(tmp_path: Path) -> None:
+    root = logging.getLogger()
+    old_level, old_handlers = root.level, root.handlers[:]
+    log_dir = tmp_path / "logs"  # 父目录不存在,应自动创建
+    try:
+        setup_logging(level="INFO", log_dir=str(log_dir), json_logs=True)
+        logging.getLogger("t").info("你好")
+        for handler in root.handlers:
+            handler.flush()
+        record = json.loads((log_dir / "energy-bot.log").read_text(encoding="utf-8").strip())
+        assert record["level"] == "INFO"
+        assert record["logger"] == "t"
+        assert record["msg"] == "你好"
+        assert record["ts"]
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.setLevel(old_level)
+        root.handlers[:] = old_handlers
