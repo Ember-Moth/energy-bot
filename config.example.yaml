@@ -67,3 +67,11 @@ rental:
   upstream_concurrency: 4     # 每进程、每供应商的并发 HTTP 上限
   upstream_requests_per_second: 20 # TronBid 商户跨进程共享的平滑请求速率
   upstream_orders_per_second: 5    # TronBid 商户跨进程共享的下单速率
+
+payment:                      # 收款(用户 TRX 充值)
+  gmpay:                      # GMPay(epusdt)网关,接入方案见 docs/gmpay-integration.md
+    base_url: ""              # 自部署 epusdt 实例地址,如 https://pay.example.com;空 = 充值未启用
+    pid: "1000"               # 商户 PID(参与签名)
+    secret_key: ""            # 签名密钥;建议环境变量注入:ENERGY_BOT_PAYMENT__GMPAY__SECRET_KEY
+    currency: "trx"           # 下单币种:trx = 金额即 TRX 数量(网关 coin==base 短路,汇率 1)
+    timeout_seconds: 10       # 单请求超时(秒)

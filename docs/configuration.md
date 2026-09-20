@@ -37,6 +37,11 @@ bot 是打包安装的应用(控制台命令 `energy-bot`),配置基于 pydantic
 | `upstream.tronbid.base_url` | 否 | TronBid 官方地址 | 须为 `https://` 且路径以 `/api/` 开头 |
 | `upstream.tronbid.api_key` | 是(启用时) | 空 | API Key(`Authorization: Bearer`);建议环境变量注入:`ENERGY_BOT_UPSTREAM__TRONBID__API_KEY` |
 | `upstream.tronbid.timeout_seconds` | 否 | `10.0` | 上游单请求超时,大于 0 且不超过 60 秒 |
+| `payment.gmpay.base_url` | 是(启用充值时) | 空 | 自部署 epusdt 实例地址,须 `https://`;空 = 充值未启用 |
+| `payment.gmpay.pid` | 否 | `"1000"` | 商户 PID,参与签名 |
+| `payment.gmpay.secret_key` | 是(启用充值时) | 空 | 签名密钥;建议环境变量注入:`ENERGY_BOT_PAYMENT__GMPAY__SECRET_KEY`;与 base_url 须同时配置,只配一个则充值停用并告警 |
+| `payment.gmpay.currency` | 否 | `"trx"` | 下单币种;`trx` = 金额即 TRX 数量(网关 coin==base 短路,汇率 1) |
+| `payment.gmpay.timeout_seconds` | 否 | `10.0` | 网关单请求超时,大于 0 且不超过 60 秒 |
 
 **DSN 只允许环境变量**:`ENERGY_BOT_DATABASE__DSN` 提供完整连接串(设置后优先生效,适合密钥管理系统统一注入);配置文件里出现 `database.dsn` 会被直接拒绝,文件里请使用上面的离散字段。
 
