@@ -74,6 +74,7 @@ WantedBy=multi-user.target
 ## 注意事项
 
 - **健康检查**:`GET /healthz` 返回 `ok`,可用于负载均衡探活;
+- **日志**:默认输出到 stderr,systemd 自动收入 journald(`journalctl -u energy-bot`);需要落盘文件时配置 `log.file`,自带按大小滚动,详见[配置说明](configuration.md);
 - **滚动重启**:退出时会 `delete_webhook`,重启间隙消息会短暂中断;如需零停机部署,注释掉 `app.py` 中 `on_shutdown` 里的 `delete_webhook` 调用;
 - **`webhook.path`**:Telegram 允许任意路径,改成随机串可以在密钥校验之外多一层防护;
 - **set_webhook 覆盖**:同一个 bot 只有一个 webhook,重复启动新实例会覆盖旧地址。

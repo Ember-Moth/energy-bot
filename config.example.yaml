@@ -28,3 +28,13 @@ webhook:
   # 留空:每次启动自动随机生成,仅本次启动有效
   # 固定:生成一段随机串填入,如 python -c "import secrets; print(secrets.token_urlsafe(32))"
   secret_token: ""
+
+# 日志配置
+log:
+  # 日志级别:DEBUG / INFO / WARNING / ERROR / CRITICAL
+  level: "INFO"
+  # 日志文件路径;留空仅输出到 stderr(systemd 部署时自动收入 journald)
+  file: ""
+  # 以下仅在 file 非空时生效
+  file_max_bytes: 10485760  # 单文件 10MB,超出后滚动
+  file_backup_count: 5      # 滚动保留的历史文件数

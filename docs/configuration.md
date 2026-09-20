@@ -26,6 +26,10 @@ energy-bot --config /etc/energy-bot/config.yaml   # 指定路径(生产部署常
 | `webhook.port` | 否 | `8080` | 本地监听端口,取值 1–65535 |
 | `webhook.path` | 否 | `/webhook` | webhook 路径,不以 `/` 开头会自动补上;建议用随机串 |
 | `webhook.secret_token` | 否 | 每次启动随机生成 | 请求校验密钥,详见下文 |
+| `log.level` | 否 | `INFO` | 日志级别:`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` |
+| `log.file` | 否 | 空 | 日志文件路径;留空仅输出到 stderr(systemd 部署时自动收入 journald) |
+| `log.file_max_bytes` | 否 | `10485760` | 单个日志文件上限(字节),超出后滚动,仅 `file` 非空时生效 |
+| `log.file_backup_count` | 否 | `5` | 滚动保留的历史日志文件数 |
 
 ## 校验行为
 
@@ -35,7 +39,9 @@ energy-bot --config /etc/energy-bot/config.yaml   # 指定路径(生产部署常
 - YAML 语法错误(附带解析器报错详情);
 - `bot_token` 缺失或为空;
 - `webhook.base_url` 缺失或不是 `https://` 开头(Telegram 强制要求 HTTPS);
-- `webhook.port` 不是 1–65535 的整数。
+- `webhook.port` 不是 1–65535 的整数;
+- `log.level` 不是合法级别;
+- `webhook` / `log` 段不是键值映射。
 
 另外:`base_url` 尾部的 `/` 会被自动去掉;未识别的字段会被忽略,不会报错。
 

@@ -2,8 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from energy_bot.config import Settings, WebhookSettings, default_config_path, load_settings
+from energy_bot.config import (
+    Settings,
+    WebhookSettings,
+    default_config_path,
+    load_settings,
+)
 from energy_bot.handlers import routers
+from energy_bot.logging_setup import setup_logging
 from energy_bot.middlewares.logging import LoggingMiddleware
 
 
@@ -65,6 +71,67 @@ def test_default_config_path_in_user_config_dir() -> None:
     path = default_config_path()
     assert path.name == "config.yaml"
     assert "energy-bot" in path.parts
+
+
+def test_load_settings_log_defaults(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "bot_token: abc\nwebhook:\n  base_url: https://example.com\n",
+        encoding="utf-8",
+    )
+    log = load_settings(config).log
+    assert log.level == "INFO"
+    assert log.file == ""
+    assert log.file_max_bytes == 10 * 1024 * 1024
+    assert log.file_backup_count == 5
+
+
+def test_load_settings_log_parsing(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "bot_token: abc\n"
+        "webhook:\n"
+        "  base_url: https://example.com\n"
+        "log:\n"
+        "  level: debug\n"
+        "  file: /tmp/energy-bot.log\n",
+        encoding="utf-8",
+    )
+    log = load_settings(config).log
+    assert log.level == "DEBUG"  # 大小写不敏感,统一为大写
+    assert log.file == "/tmp/energy-bot.log"
+
+
+def test_invalid_log_level_exits(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "bot_token: abc\nwebhook:\n  base_url: https://example.com\nlog:\n  level: VERBOSE\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit):
+        load_settings(config)
+
+
+def test_setup_logging_applies_level_and_writes_file(tmp_path: Path) -> None:
+    import logging
+
+    from energy_bot.config import LogSettings
+
+    root = logging.getLogger()
+    old_level, old_handlers = root.level, root.handlers[:]
+    log_file = tmp_path / "logs" / "bot.log"  # 父目录不存在,应自动创建
+    try:
+        setup_logging(LogSettings(level="DEBUG", file=str(log_file)))
+        assert root.level == logging.DEBUG
+        logging.getLogger("t").debug("hello")
+        for handler in root.handlers:
+            handler.flush()
+        assert "hello" in log_file.read_text(encoding="utf-8")
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.setLevel(old_level)
+        root.handlers[:] = old_handlers
 
 
 def test_missing_config_file_exits(tmp_path: Path) -> None:
