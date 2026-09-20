@@ -1,0 +1,28 @@
+# energy-bot 配置示例
+# 复制为 config.yaml 后填写;config.yaml 已被 gitignore,不会提交到仓库
+
+# [必填] 从 @BotFather 获取的 bot token
+bot_token: "123456789:AAF...your-token-here"
+
+# [必填] webhook 相关配置
+webhook:
+  # [必填] 公网可访问的 HTTPS 基地址,Telegram 会把更新 POST 到 {base_url}{path}
+  # 本地调试可用隧道获得临时地址,如:
+  #   cloudflared tunnel --url http://localhost:8080
+  #   ngrok http 8080
+  base_url: "https://bot.example.com"
+
+  # 本地监听地址(默认 0.0.0.0;仅本机访问可改为 127.0.0.1)
+  host: "0.0.0.0"
+
+  # 本地监听端口(默认 8080;生产环境通常由 Nginx/Caddy 终止 TLS 后转发到这里)
+  port: 8080
+
+  # webhook 路径(默认 /webhook;建议改成随机串增加一层防护)
+  path: "/webhook"
+
+  # 请求校验密钥,Telegram 请求头 X-Telegram-Bot-Api-Secret-Token 必须携带此值,
+  # 伪造请求会被直接拒绝(401)
+  # 留空:每次启动自动随机生成,仅本次启动有效
+  # 固定:生成一段随机串填入,如 python -c "import secrets; print(secrets.token_urlsafe(32))"
+  secret_token: ""

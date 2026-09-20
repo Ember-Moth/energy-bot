@@ -1,0 +1,64 @@
+[project]
+name = "energy-bot"
+version = "0.1.0"
+description = "Telegram bot built with aiogram 3"
+readme = "README.md"
+authors = [
+    { name = "Ember Moth", email = "ember_moth@proton.me" }
+]
+requires-python = ">=3.14.7"
+dependencies = [
+    "aiogram>=3.31.0",
+    "aiohttp>=3.14.3",
+    "pyyaml>=6.0.3",
+    "uvloop>=0.22 ; sys_platform != 'win32'",
+]
+
+[project.scripts]
+energy-bot = "energy_bot.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "ASYNC", # flake8-async
+    "RUF", # ruff 自身规则
+]
+ignore = [
+    "RUF001", # 字符串中的中文全角标点（，：！等）是合法的
+    "RUF002", # docstring 同上
+    "RUF003", # 注释同上
+]
+
+[tool.pyright]
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
