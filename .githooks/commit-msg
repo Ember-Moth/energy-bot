@@ -1,0 +1,3 @@
+#!/bin/sh
+# 校验提交信息是否符合 Conventional Commits(由 commitizen 执行)
+exec uv run cz check --commit-msg-file "$1"
