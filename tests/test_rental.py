@@ -12,7 +12,10 @@ from energy_bot.repositories import orders as orders_repo
 from energy_bot.repositories import users as users_repo
 from energy_bot.services import rental
 
-VALID_ADDRESS = "T" + "2" * 33
+# 知名黑洞地址(0x41 + 20 个零字节),base58check 校验和有效
+VALID_ADDRESS = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
+# 0x41 + 字节 1..20 的确定性有效地址
+VALID_ADDRESS_2 = "TA4Y62o6YC2Zsck9rZVGTvqW1AQ7X9zTnj"
 
 
 def _order(status: OrderStatus) -> Order:
@@ -42,8 +45,13 @@ def test_denied_transitions_raise() -> None:
 
 
 def test_terminal_states_have_no_exits() -> None:
-    for terminal in (OrderStatus.EXPIRED, OrderStatus.FAILED, OrderStatus.REFUNDED):
+    for terminal in (OrderStatus.EXPIRED, OrderStatus.REFUNDED):
         assert rental.ALLOWED_TRANSITIONS[terminal] == frozenset()
+
+
+def test_failed_order_can_be_refunded() -> None:
+    # 上游执行失败后的售后路径:failed → refunded
+    rental.ensure_transition(_order(OrderStatus.FAILED), OrderStatus.REFUNDED)
 
 
 def test_tron_address_format() -> None:
@@ -52,6 +60,17 @@ def test_tron_address_format() -> None:
     assert not rental.TRON_ADDRESS_RE.fullmatch("t" + "2" * 33)  # 必须大写 T
     assert not rental.TRON_ADDRESS_RE.fullmatch("T" + "0IilO" + "2" * 28)  # 非 base58 字符
     assert not rental.TRON_ADDRESS_RE.fullmatch("T" + "2" * 32)  # 长度不足
+
+
+def test_tron_address_checksum() -> None:
+    assert rental.is_valid_tron_address(VALID_ADDRESS)
+    assert rental.is_valid_tron_address(VALID_ADDRESS_2)
+    # 篡改一位:格式依旧合法,但校验和不匹配
+    assert rental.TRON_ADDRESS_RE.fullmatch(VALID_ADDRESS[:-1] + "X")
+    assert not rental.is_valid_tron_address(VALID_ADDRESS[:-1] + "X")
+    assert not rental.is_valid_tron_address("T" + "2" * 33)  # 过正则但无校验和
+    assert not rental.is_valid_tron_address("0x1234567890")
+    assert not rental.is_valid_tron_address("")
 
 
 @pytest.mark.skipif(
@@ -119,10 +138,33 @@ async def test_rental_lifecycle() -> None:
         assert order.status is OrderStatus.EXPIRED
         await session.commit()
 
+    # 第二单走售后路径:委托上游 → 执行失败 → 退款
+    async with factory() as session:
+        failed_order = await rental.place_order(
+            session,
+            user_id=user.id,
+            recipient_address=VALID_ADDRESS_2,
+            energy_amount=65000,
+            duration_hours=1,
+            price=Decimal("2.5"),
+        )
+        failed_id = failed_order.id
+        await session.commit()
+    async with factory() as session:
+        await rental.mark_paid(session, failed_id)
+        await rental.start_delegation(
+            session, failed_id, provider="upstream-a", upstream_order_id="UP-2"
+        )
+        order = await rental.fail(session, failed_id)
+        assert order.status is OrderStatus.FAILED
+        order = await rental.refund(session, failed_id)  # failed → refunded 售后通道
+        assert order.status is OrderStatus.REFUNDED
+        await session.commit()
+
     # 对账与按用户查询
     async with factory() as session:
         by_upstream = await orders_repo.get_by_upstream_order_id(session, "UP-1")
         assert by_upstream is not None and by_upstream.id == order_id
         mine = await orders_repo.list_by_user(session, 42)
-        assert [o.id for o in mine] == [order_id]
+        assert [o.id for o in mine] == [failed_id, order_id]  # 按创建时间倒序
     await engine.dispose()

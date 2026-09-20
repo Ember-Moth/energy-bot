@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -15,7 +16,10 @@ from energy_bot.repositories import orders as order_repo
 # T 开头 + 33 个 base58 字符(排除 0OIl)
 TRON_ADDRESS_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 
-# 允许的状态跃迁;终态不再迁出
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+TRON_ADDRESS_PREFIX = 0x41  # 主网地址解码后的首字节
+
+# 允许的状态跃迁;EXPIRED / REFUNDED 为终态不再迁出
 ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.DRAFT: frozenset({OrderStatus.PAID}),
     OrderStatus.PAID: frozenset({OrderStatus.DELEGATING, OrderStatus.REFUNDED}),
@@ -24,7 +28,7 @@ ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     ),
     OrderStatus.ACTIVE: frozenset({OrderStatus.EXPIRED}),
     OrderStatus.EXPIRED: frozenset(),
-    OrderStatus.FAILED: frozenset(),
+    OrderStatus.FAILED: frozenset({OrderStatus.REFUNDED}),  # 上游失败后可退款
     OrderStatus.REFUNDED: frozenset(),
 }
 
@@ -39,6 +43,32 @@ class InvalidTransitionError(RentalError):
 
 def _now() -> datetime:
     return datetime.now(TIMEZONE)
+
+
+def _b58decode(s: str) -> bytes:
+    """base58 解码(仅限字母表内字符,调用前先用 TRON_ADDRESS_RE 过滤)。"""
+    num = 0
+    for ch in s:
+        num = num * 58 + BASE58_ALPHABET.index(ch)
+    payload = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
+    pad = len(s) - len(s.lstrip("1"))  # 前导 '1' 代表前导零字节
+    return b"\x00" * pad + payload
+
+
+def is_valid_tron_address(address: str) -> bool:
+    """base58check 全量校验:格式 + 主网前缀 + 双 SHA-256 校验和。
+
+    仅过正则是远远不够的:打错一个字符的地址同样是 34 位 base58,
+    能量委托过去将无法收回。
+    """
+    if not TRON_ADDRESS_RE.fullmatch(address):
+        return False
+    raw = _b58decode(address)
+    if len(raw) != 25 or raw[0] != TRON_ADDRESS_PREFIX:
+        return False
+    body, checksum = raw[:-4], raw[-4:]
+    digest = hashlib.sha256(hashlib.sha256(body).digest()).digest()
+    return digest[:4] == checksum
 
 
 def ensure_transition(order: Order, to: OrderStatus) -> None:
@@ -59,7 +89,7 @@ async def place_order(
     price: Decimal,
 ) -> Order:
     """创建待支付订单(draft)。"""
-    if not TRON_ADDRESS_RE.fullmatch(recipient_address):
+    if not is_valid_tron_address(recipient_address):
         raise RentalError(f"无效的 TRON 地址:{recipient_address}")
     if energy_amount <= 0:
         raise RentalError("energy_amount 必须为正整数")
@@ -145,7 +175,7 @@ async def fail(session: AsyncSession, order_id: int) -> Order:
 
 
 async def refund(session: AsyncSession, order_id: int) -> Order:
-    """退款:paid / delegating → refunded。"""
+    """退款:paid / delegating / failed → refunded。"""
     order = await _get_locked(session, order_id)
     ensure_transition(order, OrderStatus.REFUNDED)
     order.status = OrderStatus.REFUNDED
