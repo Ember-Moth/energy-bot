@@ -67,3 +67,23 @@ Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求
 ## 示例
 
 见 [`config.example.yaml`](../config.example.yaml)。
+
+## 订单系统 rental
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `rental.enabled` | `false` | 开启余额下单与后台采购;默认关闭 |
+| `rental.products` | `[]` | 套餐列表,同数量和租期不能重复 |
+| `products[].energy_amount` | 必填 | 正整数能量数量 |
+| `products[].duration_minutes` | 必填 | 1–525600 分钟 |
+| `products[].price_trx` | 必填 | 正数销售价,最多 6 位小数,小于 1,000,000 TRX |
+| `products[].max_cost_trx` | 销售价 | 询价成本上限,不是上游成交价保证 |
+| `rental.poll_seconds` | `5` | 调度轮询间隔,1–300 秒 |
+| `rental.lease_seconds` | `180` | 工作租约,180–3600 秒,覆盖最大请求超时 |
+| `rental.batch_size` | `20` | 每轮最多处理的订单和通知数,1–100 |
+| `rental.quote_retry_limit` | `3` | 无可采购报价的尝试次数,1–100;耗尽解冻 |
+
+示例见 `config.example.yaml`,环境变量仍使用 `ENERGY_BOT_RENTAL__...` 覆盖。
+TRONow 需要 api_key 和 api_secret 才进入比价池;TronBid 需要 api_key。
+两者均使用经营者的上游预存余额。用户充值渠道不在此配置中。
+完整流程、异常恢复和资金语义见 [订单系统](orders.md)。

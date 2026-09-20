@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from energy_bot.config import TronowSettings
 from energy_bot.models import OrderStatus, UpstreamDelivery
 from energy_bot.services import rental
+from energy_bot.services.procurement import wake_tronow
 from energy_bot.services.rental import RentalError
 from energy_bot.services.upstream.tronow import TronowApiError, TronowClient, TronowOrderStatus
 
@@ -186,6 +187,9 @@ class TronowWebhookView:
         ):
             logger.warning("TRONow 回调载荷不符合终态契约: event=%s", event)
             return "invalid"
+
+        if await wake_tronow(session, order_id, nested.get("client_order_id")):
+            return "applied"
 
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
         if order is None:

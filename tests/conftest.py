@@ -8,7 +8,7 @@ from alembic.config import Config
 from sqlalchemy import delete
 
 from energy_bot.db import create_engine_from_dsn, create_session_factory
-from energy_bot.models import Order, UpstreamDelivery, User
+from energy_bot.models import Base
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
@@ -37,7 +37,7 @@ async def db_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _clean_env
     factory = create_session_factory(engine)
     try:
         async with factory() as session:
-            for model in (UpstreamDelivery, Order, User):
+            for model in reversed(Base.metadata.sorted_tables):
                 await session.execute(delete(model))
             await session.commit()
         yield factory

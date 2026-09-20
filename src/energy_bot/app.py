@@ -17,6 +17,8 @@ from energy_bot.handlers import routers
 from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.db import DbSessionMiddleware
 from energy_bot.middlewares.logging import LoggingMiddleware
+from energy_bot.services.procurement import OrderWorker
+from energy_bot.services.providers import build_providers
 from energy_bot.web.health import register_health_routes
 from energy_bot.web.telegram import register_telegram_routes
 from energy_bot.web.tronow import register_tronow_webhook
@@ -61,6 +63,7 @@ async def amain(config_path: Path | None = None) -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    dp["rental_settings"] = settings.rental
     dp.message.middleware(LoggingMiddleware())
     dp.message.middleware(DbSessionMiddleware(session_factory))
     dp.callback_query.middleware(LoggingMiddleware())
@@ -90,6 +93,20 @@ async def amain(config_path: Path | None = None) -> None:
             drop_pending_updates=False,
         )
         resources.push_async_callback(bot.delete_webhook)
+        if settings.rental.enabled:
+
+            async def send_order_message(user_id: int, text: str) -> None:
+                await bot.send_message(user_id, text, parse_mode=None)
+
+            worker = OrderWorker(
+                session_factory,
+                build_providers(settings.upstream),
+                settings.rental,
+                send_order_message,
+            )
+            worker.start()
+            resources.push_async_callback(worker.close)
+
         logger.info("webhook 已注册: %s", webhook_url)
         logger.info("监听 %s:%d%s", hook.host, hook.port, hook.path)
 

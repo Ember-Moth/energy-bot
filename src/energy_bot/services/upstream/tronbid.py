@@ -173,9 +173,11 @@ class TronbidClient:
             raise ValueError("base_url 必须是 https:// 且路径以 /api/ 开头(仅回环地址允许 http)")
         return base
 
-    async def _request(self, method: str, resource: str, *, data: Any = None) -> Any:
+    async def _request(
+        self, method: str, resource: str, *, data: Any = None, raw_body: bytes | None = None
+    ) -> Any:
         method = method.upper()
-        if method == "GET" and data is not None:
+        if method == "GET" and (data is not None or raw_body is not None):
             raise ValueError("GET 请求不能携带 body")
         url = f"{self._base()}/{resource.lstrip('/')}"
         body = (
@@ -183,6 +185,8 @@ class TronbidClient:
             if data is None
             else json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
         )
+        if raw_body is not None:
+            body = raw_body
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._settings.timeout_seconds)
@@ -246,7 +250,12 @@ class TronbidClient:
         }
         if payer_address:
             payload["payer_address"] = payer_address
-        return _parse_order(await self._request("POST", "orders", data=payload))
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+        return await self.submit_order(body)
+
+    async def submit_order(self, body: bytes) -> TronbidOrder:
+        """按原始载荷重放相同幂等请求,只使用余额支付的限制由采购层保证。"""
+        return _parse_order(await self._request("POST", "orders", raw_body=body))
 
     async def get_order(self, order_id: str) -> TronbidOrder:
         return _parse_order(await self._request("GET", f"orders/{order_id}"))

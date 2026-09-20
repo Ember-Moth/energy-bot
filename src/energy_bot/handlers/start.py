@@ -9,7 +9,11 @@ from energy_bot.repositories import users as user_repo
 
 router = Router(name="start")
 
-HELP_TEXT = "可用命令:\n/start - 开始对话\n/help - 查看帮助"
+HELP_TEXT = (
+    "可用命令:\n/start - 开始对话\n/help - 查看帮助"
+    "\n/rent - 查看套餐与下单\n/balance - 查询余额\n/orders - 最近订单"
+    "\n/order 订单号 - 查询详情\n/cancel_order 订单号 - 取消尚未采购的订单"
+)
 
 
 @router.message(CommandStart())

@@ -231,11 +231,12 @@ class TronowClient:
         data: Any = None,
         params: dict[str, str] | None = None,
         idempotency_key: str = "",
+        raw_body: bytes | None = None,
     ) -> tuple[Any, str | None, str | None, int | None]:
         method = method.upper()
         if method == "POST" and not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise ValueError("POST 需要 8-128 位可见 ASCII 的稳定幂等键")
-        if method == "GET" and data is not None:
+        if method == "GET" and (data is not None or raw_body is not None):
             raise ValueError("GET 请求不能携带 body")
 
         base, _ = self._base()
@@ -252,6 +253,8 @@ class TronowClient:
             if data is None
             else json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
         )
+        if raw_body is not None:
+            body = raw_body
         timestamp = str(int(time.time() * 1000))
         nonce = secrets.token_hex(18)  # 36 位,满足 16-128 位 URL-safe 要求
         parsed = urlparse(url)
@@ -335,8 +338,13 @@ class TronowClient:
             "resource_amount": resource_amount,
             "duration": "1h",
         }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+        return await self.submit_order(body, idempotency_key=idempotency_key)
+
+    async def submit_order(self, body: bytes, *, idempotency_key: str) -> CreatedOrder:
+        """发送已持久化的精确请求字节;恢复时不得重新生成业务标识或载荷。"""
         data, request_id, _, retry_after = await self._request(
-            "POST", "orders", data=payload, idempotency_key=idempotency_key
+            "POST", "orders", raw_body=body, idempotency_key=idempotency_key
         )
         try:
             accepted = TronowOrderAccepted(

@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import yaml
 from platformdirs import user_config_dir
-from pydantic import Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -136,6 +137,30 @@ class UpstreamSettings(BaseSettings):
     tronbid: TronbidSettings = Field(default_factory=TronbidSettings)
 
 
+class RentalProduct(BaseModel):
+    energy_amount: int = Field(gt=0, le=2147483647)
+    duration_minutes: int = Field(gt=0, le=525600)
+    price_trx: Decimal = Field(gt=0, max_digits=12, decimal_places=6)
+    max_cost_trx: Decimal | None = Field(default=None, gt=0, max_digits=20, decimal_places=6)
+
+
+class RentalSettings(BaseModel):
+    enabled: bool = False
+    products: list[RentalProduct] = Field(default_factory=list)
+    poll_seconds: float = Field(default=5, ge=1, le=300)
+    lease_seconds: int = Field(default=180, ge=180, le=3600)
+    batch_size: int = Field(default=20, ge=1, le=100)
+    quote_retry_limit: int = Field(default=3, ge=1, le=100)
+
+    @field_validator("products")
+    @classmethod
+    def unique_products(cls, value: list[RentalProduct]) -> list[RentalProduct]:
+        keys = [(p.energy_amount, p.duration_minutes) for p in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("产品的能量数量和租期不能重复")
+        return value
+
+
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_LOGGING_")
 
@@ -160,6 +185,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    rental: RentalSettings = Field(default_factory=RentalSettings)
 
     @classmethod
     def settings_customise_sources(

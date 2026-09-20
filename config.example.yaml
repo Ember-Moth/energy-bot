@@ -41,3 +41,16 @@ logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL
   log_dir: ""                # 日志文件目录;空 = 只输出 stdout(systemd 部署收入 journald)
   json_logs: false           # stdout 用 JSON 格式,生产环境建议 true;文件始终为 JSON
+
+rental:
+  enabled: false              # 配置好上游余额与产品后启用订单工作器和 /rent
+  products: []               # 由你设定销售价;用户不能传入价格
+  # products:
+  #   - energy_amount: 65000
+  #     duration_minutes: 60
+  #     price_trx: "5.000000" # 示例销售价,不是实际推荐定价
+  #     max_cost_trx: "4.000000" # 可选询价预算,默认销售价;上游下单才锁价
+  poll_seconds: 5
+  lease_seconds: 180          # 任务租约,须覆盖询价和提交的超时窗口
+  batch_size: 20
+  quote_retry_limit: 3        # 无可采购报价时重试次数,耗尽释放用户冻结款

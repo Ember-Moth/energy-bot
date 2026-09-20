@@ -41,7 +41,12 @@ async def get_order(session: AsyncSession, order_id: int) -> Order | None:
 
 async def get_order_for_update(session: AsyncSession, order_id: int) -> Order | None:
     """行锁取单:支付回调、后台任务与 handler 并发触碰同一订单时用它。"""
-    stmt = select(Order).where(Order.id == order_id).with_for_update()
+    stmt = (
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -57,7 +62,7 @@ async def get_by_upstream_order_id(
         Order.provider == provider, Order.upstream_order_id == upstream_order_id
     )
     if for_update:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 

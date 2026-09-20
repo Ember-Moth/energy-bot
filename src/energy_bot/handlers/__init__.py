@@ -1,5 +1,5 @@
 from aiogram import Router
 
-from . import echo, start
+from . import echo, rental, start
 
-routers: tuple[Router, ...] = (start.router, echo.router)
+routers: tuple[Router, ...] = (start.router, rental.router, echo.router)

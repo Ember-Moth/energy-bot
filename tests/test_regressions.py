@@ -100,11 +100,17 @@ async def test_tronow_business_id_and_stable_idempotency(business_id: str) -> No
         assert len(received[0][1]) > 64  # 不与直接使用业务单号的键空间重叠
 
 
-async def test_startup_preserves_pending_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_startup_preserves_pending_updates(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
     settings = Settings(
         bot_token="synthetic", database=DatabaseSettings(dsn="postgresql://u@localhost/test")
     )
     settings.webhook.base_url = "https://example.com"
+    settings.rental.enabled = enabled
+    worker = MagicMock(close=AsyncMock())
+    monkeypatch.setattr(bot_app, "OrderWorker", lambda *args: worker)
     monkeypatch.setattr(bot_app, "load_settings", lambda _: settings)
     monkeypatch.setattr(bot_app, "setup_logging", MagicMock())
     engine = MagicMock(dispose=AsyncMock())
@@ -131,6 +137,8 @@ async def test_startup_preserves_pending_updates(monkeypatch: pytest.MonkeyPatch
     assert bot.set_webhook.await_args.kwargs["drop_pending_updates"] is False
     bot.delete_webhook.assert_awaited_once()
     engine.dispose.assert_awaited_once()
+    assert worker.start.call_count == int(enabled)
+    assert worker.close.await_count == int(enabled)
 
 
 async def test_alembic_cli_from_other_directory(db_factory, tmp_path: Path) -> None:
