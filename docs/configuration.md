@@ -1,0 +1,38 @@
+# 配置说明
+
+bot 启动时从工作目录读取 `config.yaml`(模板见仓库根目录的 `config.example.yaml`)。该文件包含 bot token,**已被 gitignore,不要提交到仓库**。
+
+## 字段一览
+
+| 字段 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `bot_token` | 是 | — | 从 @BotFather 获取的 bot token |
+| `webhook.base_url` | 是 | — | 公网 HTTPS 基地址,Telegram 把更新 POST 到 `{base_url}{path}` |
+| `webhook.host` | 否 | `0.0.0.0` | 本地监听地址,仅本机访问可改为 `127.0.0.1` |
+| `webhook.port` | 否 | `8080` | 本地监听端口,取值 1–65535 |
+| `webhook.path` | 否 | `/webhook` | webhook 路径,不以 `/` 开头会自动补上;建议用随机串 |
+| `webhook.secret_token` | 否 | 每次启动随机生成 | 请求校验密钥,详见下文 |
+
+## 校验行为
+
+加载失败时进程会以 `SystemExit` 退出并给出中文提示,包括以下情况:
+
+- 配置文件不存在(提示复制 `config.example.yaml`);
+- YAML 语法错误(附带解析器报错详情);
+- `bot_token` 缺失或为空;
+- `webhook.base_url` 缺失或不是 `https://` 开头(Telegram 强制要求 HTTPS);
+- `webhook.port` 不是 1–65535 的整数。
+
+另外:`base_url` 尾部的 `/` 会被自动去掉;未识别的字段会被忽略,不会报错。
+
+## secret_token
+
+Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求头携带此密钥,服务端校验失败直接返回 401,因此伪造的更新无法进入 bot。
+
+- **留空(默认)**:每次启动自动生成随机密钥并打进日志,仅本次启动有效,无需任何配置即安全;
+- **固定填入**:适合多实例部署等需要密钥跨重启稳定的场景,生成方式:
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+## 示例
+
+见 [`config.example.yaml`](../config.example.yaml)。
