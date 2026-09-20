@@ -48,8 +48,8 @@ logging:                     # 日志配置
 
 rental:
   enabled: false              # 配置好上游余额与产品后启用订单工作器和 /rent
-  products: []               # 由你设定销售价;用户不能传入价格
-  # products:
+  products: []               # 由你设定销售价;用户不能传入价格,也不能选择租期
+  # products:                # 产品约定:只卖最短租期,同一能量数量只允许上架一个租期
   #   - energy_amount: 65000
   #     duration_minutes: 60
   #     price_trx: "5.000000" # 示例销售价,不是实际推荐定价

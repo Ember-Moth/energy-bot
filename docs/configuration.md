@@ -73,9 +73,9 @@ Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `rental.enabled` | `false` | 开启余额下单与后台采购;默认关闭 |
-| `rental.products` | `[]` | 套餐列表,同数量和租期不能重复 |
+| `rental.products` | `[]` | 套餐列表,同数量和租期不能重复;同一能量数量只允许一个租期(用户下单不选租期) |
 | `products[].energy_amount` | 必填 | 正整数能量数量 |
-| `products[].duration_minutes` | 必填 | 1–525600 分钟 |
+| `products[].duration_minutes` | 必填 | 1–525600 分钟;产品约定只卖最短租期,由套餐决定、不向用户开放选择 |
 | `products[].price_trx` | 必填 | 正数销售价,最多 6 位小数,小于 1,000,000 TRX |
 | `products[].max_cost_trx` | 销售价 | 多上游询价成本上限;单上游仅用于成交后告警,不是成交价保证 |
 | `rental.poll_seconds` | `5` | 未完成订单的再次查单间隔,1–300 秒 |

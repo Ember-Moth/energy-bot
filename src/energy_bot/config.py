@@ -171,6 +171,10 @@ class RentalSettings(BaseModel):
         keys = [(p.energy_amount, p.duration_minutes) for p in value]
         if len(keys) != len(set(keys)):
             raise ValueError("产品的能量数量和租期不能重复")
+        amounts = [p.energy_amount for p in value]
+        if len(amounts) != len(set(amounts)):
+            # /rent 只按能量数量匹配套餐(租期不给用户选),同能量多租期无法区分
+            raise ValueError("同一能量数量只能上架一个租期")
         return value
 
 

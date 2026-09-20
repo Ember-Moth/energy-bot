@@ -49,30 +49,22 @@ async def rent(
         await message.answer("租赁服务尚未开放。")
         return
     parts = (command.args or "").split()
-    if len(parts) != 3:
+    if len(parts) != 2:
         products = "\n".join(
             f"{p.energy_amount} 能量 / {p.duration_minutes} 分钟：{p.price_trx:f} TRX"
             for p in rental_settings.products
         )
-        await message.answer(
-            (products or "暂未上架套餐。") + "\n下单格式：/rent 能量数量 租期分钟 TRON地址"
-        )
+        await message.answer((products or "暂未上架套餐。") + "\n下单格式：/rent 能量数量 TRON地址")
         return
     try:
-        energy, minutes = int(parts[0]), int(parts[1])
+        energy = int(parts[0])
     except ValueError:
-        await message.answer("能量数量和租期分钟必须是整数。")
+        await message.answer("能量数量必须是整数。")
         return
-    product = next(
-        (
-            p
-            for p in rental_settings.products
-            if p.energy_amount == energy and p.duration_minutes == minutes
-        ),
-        None,
-    )
+    # 租期不由用户选择:按能量数量匹配套餐,使用其租期(产品约定为最短租期)
+    product = next((p for p in rental_settings.products if p.energy_amount == energy), None)
     if product is None:
-        await message.answer("该套餐未上架，请发送 /rent 查看可选套餐。")
+        await message.answer("该能量数量未上架,请发送 /rent 查看可选套餐。")
         return
     assert message.from_user is not None
     await users.upsert_user(
@@ -87,9 +79,9 @@ async def rent(
                 session,
                 user_id=message.from_user.id,
                 request_key=f"tg:{message.chat.id}:{message.message_id}",
-                recipient_address=parts[2],
+                recipient_address=parts[1],
                 energy_amount=energy,
-                duration_minutes=minutes,
+                duration_minutes=product.duration_minutes,
                 price=product.price_trx,
                 max_cost=product.max_cost_trx,
             )

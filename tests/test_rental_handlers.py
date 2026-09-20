@@ -43,9 +43,7 @@ def settings() -> RentalSettings:
 async def test_insufficient_balance_does_not_commit_draft(db_factory):
     msg = message()
     async with db_factory() as session:
-        await rent(
-            msg, CommandObject(command="rent", args=f"65000 60 {ADDRESS}"), session, settings()
-        )
+        await rent(msg, CommandObject(command="rent", args=f"65000 {ADDRESS}"), session, settings())
         await session.commit()
     assert "余额不足" in cast(AsyncMock, msg.answer).call_args.args[0]
     async with db_factory() as session:
@@ -60,7 +58,7 @@ async def test_handler_reserves_configured_price_and_replay_is_idempotent(db_fac
         async with db_factory() as session:
             await rent(
                 message(),
-                CommandObject(command="rent", args=f"65000 60 {ADDRESS}"),
+                CommandObject(command="rent", args=f"65000 {ADDRESS}"),
                 session,
                 settings(),
             )
@@ -79,9 +77,30 @@ async def test_handler_reserves_configured_price_and_replay_is_idempotent(db_fac
 async def test_group_cannot_place_private_wallet_order():
     session = AsyncMock()
     msg = message(chat_type="group")
-    await rent(msg, CommandObject(command="rent", args=f"65000 60 {ADDRESS}"), session, settings())
+    await rent(msg, CommandObject(command="rent", args=f"65000 {ADDRESS}"), session, settings())
     session.execute.assert_not_called()
     cast(AsyncMock, msg.answer).assert_awaited_once_with("请私聊机器人办理租赁。")
+
+
+async def test_duration_comes_from_product_not_user(db_factory):
+    """用户不传租期:订单租期取套餐的 duration_minutes;未上架的能量数量被拒绝。"""
+    async with db_factory() as session, session.begin():
+        await upsert_user(session, user_id=1, first_name="测试", language_code="zh")
+        await wallet.credit(session, user_id=1, amount=Decimal("10"), reference="synthetic")
+    async with db_factory() as session:
+        msg = message()
+        await rent(msg, CommandObject(command="rent", args=f"65000 {ADDRESS}"), session, settings())
+        await session.commit()
+        order = await session.scalar(select(Order))
+        assert order is not None
+        assert order.duration_minutes == 60  # 套餐租期,不是用户输入
+        assert "60 分钟" in cast(AsyncMock, msg.answer).call_args.args[0]
+        # 未上架的能量数量拒绝
+        other = message()
+        await rent(
+            other, CommandObject(command="rent", args=f"131000 {ADDRESS}"), session, settings()
+        )
+        assert "未上架" in cast(AsyncMock, other.answer).call_args.args[0]
 
 
 @pytest.mark.parametrize(
@@ -91,6 +110,11 @@ async def test_group_cannot_place_private_wallet_order():
         [{"energy_amount": 65000, "duration_minutes": 60, "price_trx": "1.0000001"}],
         [{"energy_amount": 65000, "duration_minutes": 0, "price_trx": "1"}],
         [{"energy_amount": 65000, "duration_minutes": 60, "price_trx": "1"}] * 2,
+        # 同一能量数量上架两个租期:用户无法区分,配置层直接拒绝
+        [
+            {"energy_amount": 65000, "duration_minutes": 60, "price_trx": "1"},
+            {"energy_amount": 65000, "duration_minutes": 15, "price_trx": "2"},
+        ],
     ],
 )
 def test_invalid_catalog_rejected(products):
