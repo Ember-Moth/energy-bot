@@ -17,8 +17,10 @@ from energy_bot.handlers import routers
 from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.db import DbSessionMiddleware
 from energy_bot.middlewares.logging import LoggingMiddleware
+from energy_bot.services.payment.gmpay import GmpayClient
 from energy_bot.services.procurement import OrderWorker
 from energy_bot.services.providers import build_providers
+from energy_bot.web.gmpay import register_gmpay_webhook
 from energy_bot.web.health import register_health_routes
 from energy_bot.web.telegram import register_telegram_routes
 from energy_bot.web.tronow import register_tronow_webhook
@@ -62,8 +64,21 @@ async def amain(config_path: Path | None = None) -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    gmpay = settings.payment.gmpay
+    if gmpay.base_url and gmpay.secret_key:
+        gmpay_client = GmpayClient(gmpay)
+        notify_url = f"{hook.base_url}/payment/gmpay/notify"
+    else:
+        gmpay_client = None
+        notify_url = ""
+        if gmpay.base_url or gmpay.secret_key:
+            logger.warning(
+                "payment.gmpay 配置不完整(base_url 与 secret_key 须同时提供),充值功能停用"
+            )
     dp = Dispatcher()
     dp["rental_settings"] = settings.rental
+    dp["gmpay_client"] = gmpay_client
+    dp["gmpay_notify_url"] = notify_url
     dp.message.middleware(LoggingMiddleware())
     dp.message.middleware(DbSessionMiddleware(session_factory))
     dp.callback_query.middleware(LoggingMiddleware())
@@ -74,11 +89,14 @@ async def amain(config_path: Path | None = None) -> None:
     async with AsyncExitStack() as resources:
         resources.push_async_callback(bot.session.close)
         resources.push_async_callback(engine.dispose)
+        if gmpay_client is not None:
+            resources.push_async_callback(gmpay_client.close)
 
         app = web.Application()
         register_telegram_routes(app, dp, bot, hook.path, secret_token)
         register_health_routes(app)
         register_tronow_webhook(app, settings.upstream.tronow, session_factory)
+        register_gmpay_webhook(app, gmpay, session_factory)  # 未配密钥时端点 fail-closed(503)
         setup_application(app, dp, bot=bot)
 
         runner = web.AppRunner(app, access_log=None)  # 访问日志交给 LoggingMiddleware,避免刷屏
