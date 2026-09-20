@@ -7,9 +7,33 @@
 
 ```bash
 uv sync                             # 安装全部依赖(含 dev 组)
-cp config.example.yaml config.yaml  # 填入 token 与 webhook 地址(仓库内已 gitignore)
+cp config.example.yaml config.yaml  # 填入 token、webhook 地址与数据库连接信息
 uv run energy-bot --config config.yaml  # 开发时指向仓库内配置
 ```
+
+需要本地 PostgreSQL,最简单的方式:
+
+```bash
+docker run -d --name energy-bot-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=energy_bot -p 5432:5432 postgres:17
+# 对应 DSN: postgresql://postgres:dev@localhost:5432/energy_bot
+```
+
+数据库迁移由 Alembic 管理(schema 变更见下节),启动时不会自动建表。
+
+## 数据库迁移(Alembic)
+
+模型集中在 `src/energy_bot/models/` 包(每类实体一个模块,公共时间列用 `TimestampMixin`),schema 变更流程:
+
+```bash
+# 1. 修改 models/ 下对应模块(新实体:建模块并在 models/__init__.py 导出)
+# 2. 自动生成迁移(DSN 从应用配置读取,可用 ENERGY_BOT_CONFIG / ENERGY_BOT_DATABASE__DSN 覆盖)
+uv run alembic revision --autogenerate -m "add xxx table"
+# 3. 人工检查 alembic/versions/ 下生成的脚本
+# 4. 应用
+uv run alembic upgrade head
+```
+
+部署环境从任意目录执行:`alembic -c /opt/energy-bot/alembic.ini upgrade head`(ini 用 `%(here)s` 定位脚本目录,不依赖工作目录)。
 
 应用本身按打包安装方式运行,默认读取平台用户配置目录(见[配置说明](configuration.md));开发时用 `--config` 指向仓库内的 `config.yaml` 最方便。
 
@@ -20,7 +44,11 @@ src/energy_bot/
 ├── __init__.py    # main():入口本体(解析参数 → 装 uvloop → 驱动 app.amain)
 ├── __main__.py    # 支持 python -m energy_bot
 ├── app.py         # amain():装配 Bot/Dispatcher/web 服务,AsyncExitStack + SIGTERM 优雅停机
-├── config.py      # 配置解析与校验(默认平台配置目录,--config 可覆盖)
+├── config.py      # pydantic-settings 模型与 load_settings(),校验失败以 SystemExit 提示
+├── models/        # ORM 模型包:base.py(Base/TimestampMixin)、user.py、order.py
+├── db.py          # async engine 与会话工厂(DSN 统一走 asyncpg 驱动)
+├── repositories/  # 薄数据访问:模块级 async 函数,首参 AsyncSession;无业务规则
+├── services/      # 业务工作流:rental.py 订单状态机与流转(status 只准在这里改)
 ├── handlers/      # 业务路由,新增功能就在这里加模块
 │   ├── start.py   # /start、/help
 │   └── echo.py    # 示例:回显文本消息

@@ -1,6 +1,6 @@
 # energy-bot
 
-基于 [aiogram 3](https://aiogram.dev/) 的 Telegram bot:全异步,[uvloop](https://github.com/MagicStack/uvloop) 事件循环,webhook 模式接收更新。仅支持 macOS / Linux 部署。
+TRON 链能量租赁 Telegram bot:基于 [aiogram 3](https://aiogram.dev/),全异步,[uvloop](https://github.com/MagicStack/uvloop) 事件循环,webhook 模式接收更新,SQLAlchemy 2.0(async)+ PostgreSQL 存储,Alembic 管理迁移。仅支持 macOS / Linux 部署。
 
 ## 快速开始
 
@@ -29,7 +29,11 @@ src/energy_bot/
 ├── __init__.py    # main() 入口(console script 与 python -m 都指向它)
 ├── __main__.py    # 支持 python -m energy_bot
 ├── app.py         # amain():装配 Bot/Dispatcher + web 服务,AsyncExitStack 优雅停机
-├── config.py      # 读取 config.yaml
+├── config.py      # pydantic-settings 配置(YAML + 环境变量覆盖)
+├── models/        # ORM 模型包(base / user / order)
+├── db.py          # async engine 与会话工厂
+├── repositories/  # 薄数据访问(users / orders)
+├── services/      # 业务工作流(订单状态机)
 ├── handlers/      # 业务路由(start、echo 示例)
 ├── middlewares/   # 中间件(更新日志)
 ├── web/           # HTTP 路由:telegram.py(更新接收)、health.py(健康检查)
@@ -48,3 +52,7 @@ uv run cz commit                             # 按规范交互式提交(英文)
 ```
 
 提交信息遵循 Conventional Commits,由 commit-msg 钩子强制校验,详见[提交规范](docs/commit-convention.md)。
+
+## 协议
+
+[MIT](LICENSE)
