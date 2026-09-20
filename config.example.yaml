@@ -1,5 +1,7 @@
 # energy-bot 配置示例
-# 复制为 config.yaml 后填写;config.yaml 已被 gitignore,不会提交到仓库
+# 复制为 config.yaml 后填写,并通过 --config 指定,或放到平台默认配置目录
+# (Linux: ~/.config/energy-bot/;macOS: ~/Library/Application Support/energy-bot/)
+# config.yaml 已被 gitignore,不会提交到仓库
 
 # [必填] 从 @BotFather 获取的 bot token
 bot_token: "123456789:AAF...your-token-here"

@@ -2,9 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from energy_bot.config import Settings, WebhookSettings, load_settings
+from energy_bot.config import Settings, WebhookSettings, default_config_path, load_settings
 from energy_bot.handlers import routers
-from energy_bot.main import _loop_factory
 from energy_bot.middlewares.logging import LoggingMiddleware
 
 
@@ -62,6 +61,12 @@ def test_load_settings_webhook_defaults(tmp_path: Path) -> None:
     assert webhook.secret_token == ""
 
 
+def test_default_config_path_in_user_config_dir() -> None:
+    path = default_config_path()
+    assert path.name == "config.yaml"
+    assert "energy-bot" in path.parts
+
+
 def test_missing_config_file_exits(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         load_settings(tmp_path / "config.yaml")
@@ -81,14 +86,3 @@ def test_missing_token_exits_cleanly(tmp_path: Path) -> None:
     )
     with pytest.raises(SystemExit):
         load_settings(config)
-
-
-def test_loop_factory_selects_uvloop() -> None:
-    factory = _loop_factory()
-    if factory is None:
-        pytest.skip("Windows 平台无 uvloop")
-    loop = factory()
-    try:
-        assert type(loop).__module__.split(".")[0] == "uvloop"
-    finally:
-        loop.close()

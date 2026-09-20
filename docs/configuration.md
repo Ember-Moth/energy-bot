@@ -1,6 +1,20 @@
 # 配置说明
 
-bot 启动时从工作目录读取 `config.yaml`(模板见仓库根目录的 `config.example.yaml`)。该文件包含 bot token,**已被 gitignore,不要提交到仓库**。
+bot 是打包安装的应用(控制台命令 `energy-bot`),配置文件默认从平台用户配置目录读取,与当前工作目录无关;也可用 `--config` 参数显式指定路径:
+
+| 平台 | 默认路径 |
+| --- | --- |
+| Linux | `~/.config/energy-bot/config.yaml` |
+| macOS | `~/Library/Application Support/energy-bot/config.yaml` |
+
+仅支持 macOS / Linux(uvloop 为无条件依赖,Windows 无法安装)。
+
+```bash
+energy-bot                          # 使用默认路径
+energy-bot --config /etc/energy-bot/config.yaml   # 指定路径(生产部署常用)
+```
+
+配置文件包含 bot token,**config.yaml 已被 gitignore,不要提交到仓库**(模板见仓库根目录的 `config.example.yaml`)。
 
 ## 字段一览
 

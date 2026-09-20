@@ -6,24 +6,42 @@
 - [uv](https://docs.astral.sh/uv/)
 
 ```bash
-uv sync                          # 安装全部依赖(含 dev 组)
-cp config.example.yaml config.yaml  # 填入 token 与 webhook 地址
-uv run energy-bot                # 启动
+uv sync                             # 安装全部依赖(含 dev 组)
+cp config.example.yaml config.yaml  # 填入 token 与 webhook 地址(仓库内已 gitignore)
+uv run energy-bot --config config.yaml  # 开发时指向仓库内配置
 ```
+
+应用本身按打包安装方式运行,默认读取平台用户配置目录(见[配置说明](configuration.md));开发时用 `--config` 指向仓库内的 `config.yaml` 最方便。
 
 ## 项目结构
 
 ```
 src/energy_bot/
-├── main.py               # 入口:webhook 模式(aiohttp 接收更新),uvloop 事件循环
-├── config.py             # 从 config.yaml 读取配置(默认工作目录下查找)
-├── handlers/             # 业务路由,新增功能就在这里加模块
-│   ├── start.py          # /start、/help
-│   └── echo.py           # 示例:回显文本消息
-├── middlewares/          # 中间件(当前:更新日志)
-└── keyboards/            # 键盘定义
-tests/                    # pytest 测试
+├── __init__.py    # main():入口本体(解析参数 → 装 uvloop → 驱动 app.amain)
+├── __main__.py    # 支持 python -m energy_bot
+├── app.py         # amain():webhook 注册、aiohttp 服务与生命周期
+├── config.py      # 配置解析与校验(默认平台配置目录,--config 可覆盖)
+├── handlers/      # 业务路由,新增功能就在这里加模块
+│   ├── start.py   # /start、/help
+│   └── echo.py    # 示例:回显文本消息
+├── middlewares/   # 中间件(当前:更新日志)
+└── keyboards/     # 键盘定义
+tests/             # pytest 测试
+docs/              # 配置 / 部署 / 开发 / 提交规范文档
 ```
+
+## 入口(三层等价)
+
+这是打包安装的 src-layout 项目,不是单脚本项目,入口有三层:
+
+1. **console script(生产用)**:`pyproject.toml` 的 `[project.scripts]` 声明
+   `energy-bot = "energy_bot:main"`,`uv sync` 后生成 `.venv/bin/energy-bot`,
+   systemd 的 `ExecStart` 跑的就是它;
+2. **模块方式(开发用)**:`python -m energy_bot`(`__main__.py` 一行调用 `main()`);
+3. **`main()` 本体**在 `__init__.py`:解析参数 → 装 uvloop → 驱动 `app.amain()`。
+
+以后加独立命令(如备份工具),在 `[project.scripts]` 加一行指向包内函数即可,例如
+`energy-bot-backup = "energy_bot.services.backup:main"`。
 
 ## 添加新功能
 

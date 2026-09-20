@@ -61,8 +61,7 @@ After=network-online.target
 
 [Service]
 User=energy-bot
-WorkingDirectory=/opt/energy-bot
-ExecStart=/opt/energy-bot/.venv/bin/energy-bot
+ExecStart=/opt/energy-bot/.venv/bin/energy-bot --config /etc/energy-bot/config.yaml
 Restart=on-failure
 RestartSec=5
 
@@ -70,11 +69,11 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-注意 `WorkingDirectory` 必须是 `config.yaml` 所在目录(配置从工作目录读取)。
+应用是打包安装的,不依赖工作目录;配置统一放 `/etc/energy-bot/config.yaml` 并用 `--config` 指定。
 
 ## 注意事项
 
 - **健康检查**:`GET /healthz` 返回 `ok`,可用于负载均衡探活;
-- **滚动重启**:退出时会 `delete_webhook`,重启间隙消息会短暂中断;如需零停机部署,注释掉 `main.py` 中 `on_shutdown` 里的 `delete_webhook` 调用;
+- **滚动重启**:退出时会 `delete_webhook`,重启间隙消息会短暂中断;如需零停机部署,注释掉 `app.py` 中 `on_shutdown` 里的 `delete_webhook` 调用;
 - **`webhook.path`**:Telegram 允许任意路径,改成随机串可以在密钥校验之外多一层防护;
 - **set_webhook 覆盖**:同一个 bot 只有一个 webhook,重复启动新实例会覆盖旧地址。

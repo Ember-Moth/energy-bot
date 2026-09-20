@@ -297,8 +297,9 @@ source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
     { name = "aiohttp" },
+    { name = "platformdirs" },
     { name = "pyyaml" },
-    { name = "uvloop", marker = "sys_platform != 'win32'" },
+    { name = "uvloop" },
 ]
 
 [package.dev-dependencies]
@@ -314,8 +315,9 @@ dev = [
 requires-dist = [
     { name = "aiogram", specifier = ">=3.31.0" },
     { name = "aiohttp", specifier = ">=3.14.3" },
+    { name = "platformdirs", specifier = ">=4.11.11" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22" },
+    { name = "uvloop", specifier = ">=0.22" },
 ]
 
 [package.metadata.requires-dev]
@@ -548,6 +550,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
+]
+
+[[package]]
+name = "platformdirs"
+version = "4.11.11"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/13/f870dd0b42690138e4e37a76b5138e5690ed4365a77071bb092d59037da0/platformdirs-4.11.11.tar.gz", hash = "sha256:b0befe8a90759e4a9a8b9820d434ae226a6549063210b596da0038a7a05aede4", size = 39949, upload-time = "2026-09-19T01:18:47.259Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/be/3ae887e84c38c4dd1c549cd5825adc93f48069a94fe1cb8ac52a9da16f15/platformdirs-4.11.11-py3-none-any.whl", hash = "sha256:972ea6b2b387155a536226a0750e46923d731d459a387c4a255c583ed2f64547", size = 24992, upload-time = "2026-09-19T01:18:45.825Z" },
 ]
 
 [[package]]

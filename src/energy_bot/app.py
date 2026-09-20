@@ -1,10 +1,8 @@
 import asyncio
 import logging
 import secrets
-import sys
-from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -16,28 +14,13 @@ from energy_bot.config import load_settings
 from energy_bot.handlers import routers
 from energy_bot.middlewares.logging import LoggingMiddleware
 
-if TYPE_CHECKING:
-    from asyncio import AbstractEventLoop
-
 logger = logging.getLogger(__name__)
 
 
-def _loop_factory() -> Callable[[], AbstractEventLoop] | None:
-    """非 Windows 平台使用 uvloop 事件循环。"""
-    if sys.platform == "win32":
-        return None
-    import uvloop
-
-    return uvloop.new_event_loop
-
-
-async def run() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+async def amain(config_path: Path | None = None) -> None:
+    """异步主体:加载配置、注册 webhook、启动 aiohttp 服务并挂起。"""
     logger.info("事件循环: %s", type(asyncio.get_running_loop()).__module__)
-    settings = load_settings()
+    settings = load_settings(config_path)
     if not settings.webhook.secret_token:
         settings = replace(
             settings,
@@ -93,7 +76,3 @@ async def run() -> None:
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
-
-
-def main() -> None:
-    asyncio.run(run(), loop_factory=_loop_factory())

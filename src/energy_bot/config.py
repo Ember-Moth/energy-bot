@@ -2,8 +2,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from platformdirs import user_config_dir
 
-DEFAULT_CONFIG_PATH = Path("config.yaml")
+DEFAULT_CONFIG_NAME = "config.yaml"
+
+
+def default_config_path() -> Path:
+    """按平台约定解析用户配置目录中的配置文件。
+
+    macOS: ~/Library/Application Support/energy-bot/config.yaml
+    Linux: ~/.config/energy-bot/config.yaml
+    """
+    return Path(user_config_dir("energy-bot")) / DEFAULT_CONFIG_NAME
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +34,12 @@ class Settings:
 
 
 def load_settings(path: Path | None = None) -> Settings:
-    path = path or DEFAULT_CONFIG_PATH
+    path = path or default_config_path()
     if not path.is_file():
         raise SystemExit(
-            f"找不到配置文件 {path}:"
-            "请复制 config.example.yaml 为 config.yaml,并填入从 @BotFather 获取的 token"
+            f"找不到配置文件 {path}。"
+            "可将 config.example.yaml 复制到上述路径,"
+            "或通过 --config 参数指定配置文件位置"
         )
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
