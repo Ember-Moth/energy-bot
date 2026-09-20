@@ -32,7 +32,8 @@ bot 是打包安装的应用(控制台命令 `energy-bot`),配置基于 pydantic
 | `upstream.tronow.base_url` | 否 | TRONow 官方地址 | 须为 `https://` 且路径以 `/openapi/v1` 开头 |
 | `upstream.tronow.api_key` | 是(启用时) | 空 | 商户 API Key;建议环境变量注入:`ENERGY_BOT_UPSTREAM__TRONOW__API_KEY` |
 | `upstream.tronow.api_secret` | 是(启用时) | 空 | 请求签名密钥;与 webhook 密钥是两个独立密钥 |
-| `upstream.tronow.timeout_seconds` | 否 | `10.0` | 上游单请求超时,1–60 秒 |
+| `upstream.tronow.webhook_secret` | 是(启用回调时) | 空 | 回调验签密钥(`X-Lease-Signature`);留空则回调端点拒绝一切请求(503) |
+| `upstream.tronow.timeout_seconds` | 否 | `10.0` | 上游单请求超时,大于 0 且不超过 60 秒 |
 
 **DSN 只允许环境变量**:`ENERGY_BOT_DATABASE__DSN` 提供完整连接串(设置后优先生效,适合密钥管理系统统一注入);配置文件里出现 `database.dsn` 会被直接拒绝,文件里请使用上面的离散字段。
 

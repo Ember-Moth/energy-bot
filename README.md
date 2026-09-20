@@ -37,7 +37,7 @@ src/energy_bot/
 ├── services/      # 业务工作流(订单状态机)
 ├── handlers/      # 业务路由(start、echo 示例)
 ├── middlewares/   # 中间件(更新日志)
-├── web/           # HTTP 路由:telegram.py(更新接收)、health.py(健康检查)
+├── web/           # HTTP 路由:telegram.py(更新接收)、health.py(健康检查)、tronow.py(上游回调)
 └── keyboards/     # 键盘定义
 tests/             # pytest 测试
 docs/              # 文档
