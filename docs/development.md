@@ -48,7 +48,7 @@ src/energy_bot/
 ├── models/        # ORM 模型包:base.py(Base/TimestampMixin)、user.py、order.py
 ├── db.py          # async engine 与会话工厂(DSN 统一走 asyncpg 驱动)
 ├── repositories/  # 薄数据访问:模块级 async 函数,首参 AsyncSession;无业务规则
-├── services/      # 业务工作流:rental.py 订单状态机与流转(status 只准在这里改)
+├── services/      # 业务工作流:rental.py 订单状态机与流转;upstream/ 上游客户端(tronow.py)
 ├── handlers/      # 业务路由,新增功能就在这里加模块
 │   ├── start.py   # /start、/help
 │   └── echo.py    # 示例:回显文本消息

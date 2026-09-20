@@ -107,6 +107,22 @@ class DatabaseSettings(BaseSettings):
         return f"postgresql://{auth}@{self.address}:{self.port}/{self.database}"
 
 
+class TronowSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_TRONOW_")
+
+    base_url: str = "https://api.tronow.io/openapi/v1"
+    api_key: str = ""  # 商户 API Key;建议环境变量注入不落盘
+    api_secret: str = ""  # 请求签名密钥;与 webhook 密钥是两个独立密钥
+    webhook_secret: str = ""  # 回调验签密钥(X-Lease-Signature);建议环境变量注入不落盘
+    timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
+
+
+class UpstreamSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_UPSTREAM_")
+
+    tronow: TronowSettings = Field(default_factory=TronowSettings)
+
+
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_LOGGING_")
 
@@ -129,6 +145,7 @@ class Settings(BaseSettings):
     bot_token: str = ""  # @BotFather 的 bot token;或设 ENERGY_BOT_BOT_TOKEN
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @classmethod

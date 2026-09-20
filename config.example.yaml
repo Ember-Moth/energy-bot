@@ -25,6 +25,13 @@ database:                    # PostgreSQL(SQLAlchemy async + asyncpg)
   # DSN 只允许环境变量:ENERGY_BOT_DATABASE__DSN(设置后优先生效);
   # 配置文件里禁止出现 dsn 字段,请使用上面的离散字段
 
+upstream:                     # 上游能量供应商
+  tronow:                     # TRONow 商户 OpenAPI(签名细节见 docs/upstream/tronow.md)
+    base_url: "https://api.tronow.io/openapi/v1"
+    api_key: ""               # 商户 API Key;建议环境变量注入:ENERGY_BOT_UPSTREAM__TRONOW__API_KEY
+    api_secret: ""            # 请求签名密钥;同上(...API_SECRET),与 webhook 密钥互为独立密钥
+    timeout_seconds: 10       # 单请求超时(秒)
+
 logging:                     # 日志配置
   level: INFO                # DEBUG/INFO/WARNING/ERROR/CRITICAL
   log_dir: ""                # 日志文件目录;空 = 只输出 stdout(systemd 部署收入 journald)

@@ -38,7 +38,7 @@ src/energy_bot/
 ├── models/        # ORM 模型包:base.py(Base/TimestampMixin)、user.py、order.py;新模型加模块并在 __init__.py 导出
 ├── db.py          # async engine 与会话工厂,DSN 统一 postgresql+asyncpg
 ├── repositories/  # 薄数据访问:模块级 async 函数,首参 AsyncSession;无业务规则
-├── services/      # 业务工作流:rental.py 订单状态机与流转(status 只准在这里改)
+├── services/      # 业务工作流:rental.py 订单状态机与流转(status 只准在这里改);upstream/ 上游客户端(tronow.py)
 ├── logging_config.py # 日志:彩色开发格式 / JSON 生产格式,按天轮转
 ├── handlers/      # 每个 Router 一个模块,在 __init__.py 的 routers 元组按优先级注册
 ├── middlewares/   # aiogram 中间件(更新日志、每更新一个 DB 会话)
