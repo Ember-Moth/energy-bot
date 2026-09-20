@@ -1,0 +1,705 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TronBid Quick Rent API",
+    "version": "2.0.0",
+    "description": "Automate TRON Energy rental for USDT TRC-20 transfers. Create idempotent orders and pay on-chain or from a TronBid balance.",
+    "contact": {
+      "name": "TronBid API Support",
+      "url": "https://t.me/tronbid"
+    }
+  },
+  "externalDocs": {
+    "description": "Localized API documentation",
+    "url": "https://tronbid.com/en/rent-tron-energy-api"
+  },
+  "servers": [
+    {
+      "url": "https://tronbid.com/api/v2/quick-rent",
+      "description": "Production"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Quote"
+    },
+    {
+      "name": "Orders"
+    },
+    {
+      "name": "Account"
+    }
+  ],
+  "paths": {
+    "/calculator": {
+      "post": {
+        "tags": [
+          "Quote"
+        ],
+        "summary": "Estimate wallet Energy requirements",
+        "operationId": "calculateEnergy",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalculatorRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Calculation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quote": {
+      "post": {
+        "tags": [
+          "Quote"
+        ],
+        "summary": "Get a live TRON Energy quote",
+        "operationId": "createQuote",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Live quote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Create an idempotent Energy rental order",
+        "operationId": "createOrder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created or previously created matching order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{id}": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Get order status",
+        "operationId": "getOrder",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Cancel an unpaid order",
+        "operationId": "cancelOrder",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{id}/set-payer": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Set the payer address for an unpaid order",
+        "operationId": "setOrderPayer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payer_address"
+                ],
+                "properties": {
+                  "payer_address": {
+                    "type": "string",
+                    "pattern": "^T[1-9A-HJ-NP-Za-km-z]{33}$",
+                    "example": "TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/balance": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Get the TronBid TRX balance linked to the API key",
+        "operationId": "getBalance",
+        "responses": {
+          "200": {
+            "description": "Account balance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "balance_trx"
+                  ],
+                  "properties": {
+                    "balance_trx": {
+                      "type": "string",
+                      "example": "150.500000"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "API key",
+        "description": "Authorization: Bearer <API_KEY>"
+      }
+    },
+    "parameters": {
+      "OrderId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "schemas": {
+      "CalculatorRequest": {
+        "type": "object",
+        "required": [
+          "wallet_address"
+        ],
+        "properties": {
+          "wallet_address": {
+            "type": "string",
+            "pattern": "^T[1-9A-HJ-NP-Za-km-z]{33}$",
+            "example": "TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+          },
+          "has_usdt": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "QuoteRequest": {
+        "type": "object",
+        "required": [
+          "energy_amount",
+          "duration_minutes"
+        ],
+        "properties": {
+          "energy_amount": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 131000
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "example": 15
+          }
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "required": [
+          "price_trx",
+          "available",
+          "expires_in_sec"
+        ],
+        "properties": {
+          "price_trx": {
+            "type": "string",
+            "example": "3.200000"
+          },
+          "available": {
+            "type": "boolean",
+            "example": true
+          },
+          "save_percent": {
+            "type": "number",
+            "example": 62
+          },
+          "expires_in_sec": {
+            "type": "integer",
+            "example": 30
+          }
+        }
+      },
+      "CreateOrderRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QuoteRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "idempotency_key",
+              "target_address"
+            ],
+            "properties": {
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128,
+                "example": "partner-onchain-001"
+              },
+              "payment_mode": {
+                "type": "string",
+                "enum": [
+                  "onchain",
+                  "balance"
+                ],
+                "default": "onchain"
+              },
+              "payer_address": {
+                "type": "string",
+                "pattern": "^T[1-9A-HJ-NP-Za-km-z]{33}$",
+                "example": "TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+              },
+              "target_address": {
+                "type": "string",
+                "pattern": "^T[1-9A-HJ-NP-Za-km-z]{33}$",
+                "example": "TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+              }
+            }
+          }
+        ]
+      },
+      "Order": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "payment_mode",
+          "amount_trx",
+          "energy_amount",
+          "duration_minutes",
+          "target_address"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending_payment",
+              "paid",
+              "delegating",
+              "delegated",
+              "failed",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "payment_mode": {
+            "type": "string",
+            "enum": [
+              "onchain",
+              "balance"
+            ]
+          },
+          "amount_trx": {
+            "type": "string",
+            "example": "3.200000"
+          },
+          "energy_amount": {
+            "type": "integer",
+            "example": 131000
+          },
+          "effective_energy_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "example": 131000
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "example": 15
+          },
+          "pay_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payer_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_address": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "qr_payload": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duplicate": {
+            "type": "boolean",
+            "default": false
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

@@ -1,0 +1,1109 @@
+openapi: 3.0.3
+info:
+  title: TRONow Merchant OpenAPI
+  version: 1.2.0
+  description: |
+    Stable merchant contract for current prices, energy orders, paid address activation, order tracking and balances.
+    GET /prices/quote is a read-only current-price preview. POST /orders obtains the merchant's current price again, locks that amount for the order, and never changes the merchant charge during provider failover. A successful POST response is the authoritative order price.
+    Merchant-wide rolling 1-second limits default to 50 authenticated requests and 10 order/activation POSTs per second, shared across API keys and service instances. Platform administrators configure both limits. Retries and idempotent replays consume quota. HTTP 429 RATE_LIMITED includes Retry-After seconds and X-RateLimit-Scope (requests/orders); this attempt has not entered business processing. Regenerate nonce, timestamp and signature for every attempt; preserve business identifiers and idempotency keys. X-RateLimit-Limit/Remaining and X-OrderRateLimit-Limit/Remaining provide current snapshots. HTTP 503 RATE_LIMIT_UNAVAILABLE fails closed before business processing.
+externalDocs:
+  description: Error reference with HTTP statuses, recovery rules and asynchronous failure codes (five languages available).
+  url: https://tronow.io/developers/errors.en.md
+x-error-catalog-url: https://tronow.io/developers/error-codes.json
+servers:
+  - url: https://api.tronow.io/openapi/v1
+security:
+  - MerchantHMAC: []
+paths:
+  /prices/quote:
+    get:
+      operationId: getCurrentPrice
+      summary: 查询商户当前销售价格
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: resource_type
+          in: query
+          required: true
+          description: 'Resource to deliver; currently ENERGY only. / 交付资源类型；当前仅开放 ENERGY。'
+          schema:
+            $ref: '#/components/schemas/ResourceType'
+        - name: resource_amount
+          in: query
+          required: true
+          description: 'Exact Energy amount enabled for this merchant. / 商户已开通产品范围内的准确能量数量。'
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+            example: 65000
+        - name: duration
+          in: query
+          required: true
+          description: 'Rental duration code; currently 1h only. / 租期代码；当前仅支持 1h。'
+          schema:
+            type: string
+            enum: [1h]
+      responses:
+        '200':
+          description: 当前价格查询成功；该价格仅供参考，订单以 POST 受理响应为准。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Quote'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /orders:
+    post:
+      operationId: createOrder
+      summary: 幂等创建能量租赁订单
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: 首次创建成功。订单已可靠落库并进入异步处理，不代表能量已经到账。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+            Location:
+              description: 订单的规范查询地址。
+              schema:
+                type: string
+            Retry-After:
+              description: 非终态订单返回；建议至少等待多少秒后首次查询订单。
+              schema:
+                type: integer
+                example: 2
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OrderAccepted'
+        '200':
+          description: 相同幂等请求返回已有结果
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+            Location:
+              description: 订单的规范查询地址。
+              schema:
+                type: string
+            Retry-After:
+              description: 非终态订单返回；建议至少等待多少秒后再次查询订单。
+              schema:
+                type: integer
+                example: 2
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OrderAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: getOrderByClientOrderId
+      summary: 按商户订单号查询订单
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: client_order_id
+          in: query
+          required: true
+          description: 'Merchant business order ID supplied at creation. / 创建时提交的商户业务订单号。'
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[!-~]{1,64}$'
+            example: merchant-order-001
+      responses:
+        '200':
+          description: 查询成功
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /orders/{order_id}:
+    get:
+      operationId: getOrder
+      summary: 按平台订单号查询订单
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: order_id
+          in: path
+          required: true
+          description: 'Platform order ID returned by creation. / 创建订单时返回的平台订单号。'
+          schema:
+            type: string
+            pattern: '^ord_[a-z2-7]+$'
+            example: ord_xxxxx
+      responses:
+        '200':
+          description: 查询成功
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /address-activations:
+    post:
+      operationId: createActivation
+      summary: 幂等创建地址激活请求
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateActivationRequest'
+      responses:
+        '201':
+          description: 首次创建成功。激活请求已可靠落库并进入异步处理，不代表链上激活已经完成。
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+            Location:
+              description: 激活请求的规范查询地址。
+              schema:
+                type: string
+            Retry-After:
+              description: 非终态激活请求返回；建议至少等待多少秒后首次查询激活请求。
+              schema:
+                type: integer
+                example: 2
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ActivationAccepted'
+        '200':
+          description: 相同幂等请求返回已有结果
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+            Location:
+              description: 激活请求的规范查询地址。
+              schema:
+                type: string
+            Retry-After:
+              description: 非终态激活请求返回；建议至少等待多少秒后再次查询激活请求。
+              schema:
+                type: integer
+                example: 2
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ActivationAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      operationId: getActivationByClientActivationId
+      summary: 按商户激活请求号查询激活请求
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: client_activation_id
+          in: query
+          required: true
+          description: 'Merchant activation business ID supplied at creation. / 创建时提交的商户激活业务编号。'
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[!-~]{1,64}$'
+            example: activate-wallet-001
+      responses:
+        '200':
+          description: 查询成功
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Activation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /address-activations/{activation_id}:
+    get:
+      operationId: getActivation
+      summary: 按平台激活请求号查询激活请求
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: activation_id
+          in: path
+          required: true
+          description: 'Platform activation ID returned by creation. / 创建激活单时返回的平台激活单号。'
+          schema:
+            type: string
+            pattern: '^act_[a-z2-7]+$'
+            example: act_xxxxx
+      responses:
+        '200':
+          description: 查询成功
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Activation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /account/balance:
+    get:
+      operationId: getBalance
+      summary: 查询商户可用和冻结余额
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      responses:
+        '200':
+          description: 查询成功
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateRemaining'
+            X-OrderRateLimit-Limit:
+              $ref: '#/components/headers/OrderRateLimit'
+            X-OrderRateLimit-Remaining:
+              $ref: '#/components/headers/OrderRateRemaining'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Balance'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    MerchantHMAC:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: 还必须提供 X-Timestamp、X-Nonce 与 X-Signature。
+  parameters:
+    Timestamp:
+      name: X-Timestamp
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9]{13}$'
+      description: Unix 毫秒时间戳。
+      example: '1789725600000'
+    Nonce:
+      name: X-Nonce
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-]+$'
+      description: 'A fresh merchant-wide URL-safe nonce for every HTTP attempt. / 每次 HTTP 尝试使用新的商户级 URL-safe nonce。'
+      example: N4mV6x8Q2pL7sK9d
+    Signature:
+      name: X-Signature
+      in: header
+      required: true
+      description: >-
+        hex HMAC-SHA256；canonical request 依次包含 method、path、canonical query、
+        X-Timestamp、X-Nonce、trim(Idempotency-Key) 与 SHA-256(body)，各字段以换行分隔。
+        读取请求的 Idempotency-Key 行为空字符串；能量和激活创建请求必须使用稳定幂等键。
+      schema:
+        type: string
+        pattern: '^[0-9A-Fa-f]{64}$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[!-~]{8,128}$'
+      description: 'Stable retry key for the same business request and exact body. / 同一业务请求及相同请求体重试时保持不变。'
+      example: merchant-order-001
+  headers:
+    RateLimit:
+      description: Merchant-wide authenticated request budget per rolling second; configurable by the platform.
+      schema: { type: integer, minimum: 1, maximum: 1000 }
+    RateRemaining:
+      description: Remaining request budget at evaluation time, not a reservation.
+      schema: { type: integer, minimum: 0 }
+    OrderRateLimit:
+      description: Combined order and activation POST budget per rolling second, including retries.
+      schema: { type: integer, minimum: 1, maximum: 1000 }
+    OrderRateRemaining:
+      description: Remaining submission budget at evaluation time, not a reservation.
+      schema: { type: integer, minimum: 0 }
+    RequestID:
+      description: 本次请求的服务端追踪 ID，与响应体的 request_id 一致。
+      schema:
+        type: string
+  schemas:
+    CreateActivationRequest:
+      type: object
+      additionalProperties: false
+      required: [client_activation_id, address]
+      properties:
+        client_activation_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[!-~]{1,64}$'
+          description: 'Merchant-unique activation business ID. / 商户内唯一的激活业务编号。'
+          example: activate-wallet-001
+        address:
+          type: string
+          description: TRON mainnet Base58Check recipient address.
+          pattern: '^T[1-9A-HJ-NP-Za-km-z]{33}$'
+          example: TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    Activation:
+      type: object
+      description: A paid asynchronous operation. Query until a final state; no activation webhook is provided.
+      required: [activation_id, client_activation_id, address, status, fee_sun, transfer_amount_sun, currency, txid, failure_code, created_at, confirmed_at, updated_at]
+      properties:
+        activation_id:
+          type: string
+          description: Platform activation ID.
+          example: act_xxxxx
+        client_activation_id:
+          type: string
+          description: Merchant activation business ID.
+          example: activate-wallet-001
+        address:
+          type: string
+          description: Target TRON mainnet address.
+        status:
+          type: string
+          enum: [PROCESSING, CONFIRMING, SUCCESS, FAILED, REVIEWING]
+        fee_sun:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Charged service fee in SUN; currently 1500000.
+        transfer_amount_sun:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Native TRX transfer amount in SUN; currently 10.
+        currency:
+          type: string
+          enum: [TRX]
+        txid:
+          type: string
+          nullable: true
+        failure_code:
+          $ref: '#/components/schemas/AsyncFailureCode'
+        created_at:
+          type: string
+          format: date-time
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+    ActivationAccepted:
+      type: object
+      additionalProperties: false
+      required: [activation_id, client_activation_id, status, fee_sun, currency, created_at]
+      properties:
+        activation_id:
+          type: string
+          example: act_xxxxx
+        client_activation_id:
+          type: string
+          example: activate-wallet-001
+        status:
+          type: string
+          enum: [PROCESSING, CONFIRMING, SUCCESS, FAILED, REVIEWING]
+        fee_sun:
+          $ref: '#/components/schemas/SunAmount'
+        currency:
+          type: string
+          enum: [TRX]
+        created_at:
+          type: string
+          format: date-time
+    Envelope:
+      type: object
+      required: [code, message, request_id, data]
+      properties:
+        code:
+          type: string
+          example: OK
+        message:
+          type: string
+          example: success
+        request_id:
+          type: string
+        data: {}
+    ResourceType:
+      type: string
+      enum: [ENERGY]
+      description: 'Publicly available TRON resource type. / 当前对外开放的 TRON 资源类型。'
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [client_order_id, resource_type, receiver_address, resource_amount, duration]
+      properties:
+        client_order_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[!-~]{1,64}$'
+          description: 'Merchant-unique business order ID for reconciliation and lookup. / 商户内唯一的业务订单号，用于对账与查单。'
+          example: merchant-order-001
+        resource_type:
+          $ref: '#/components/schemas/ResourceType'
+        receiver_address:
+          type: string
+          minLength: 34
+          maxLength: 34
+          pattern: '^T[1-9A-HJ-NP-Za-km-z]{33}$'
+          description: 'Checksum-valid TRON mainnet Energy receiver. / 校验和有效的 TRON 主网能量接收地址。'
+          example: TXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+        resource_amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 'Exact Energy amount enabled for this merchant. / 商户已开通产品范围内的准确能量数量。'
+          example: 65000
+        duration:
+          type: string
+          enum: [1h]
+          description: 'Rental duration code; currently 1h only. / 租期代码；当前仅支持 1h。'
+    Quote:
+      type: object
+      additionalProperties: false
+      required: [resource_type, resource_amount, duration, price_sun, currency, priced_at]
+      properties:
+        resource_type:
+          $ref: '#/components/schemas/ResourceType'
+        resource_amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Requested Energy amount.
+          example: 65000
+        duration:
+          type: string
+          enum: [1h]
+          description: Requested rental duration code.
+        price_sun:
+          allOf:
+            - $ref: '#/components/schemas/SunAmount'
+          description: Current total price for this request. POST /orders returns the authoritative locked amount.
+        currency:
+          type: string
+          enum: [TRX]
+        priced_at:
+          type: string
+          format: date-time
+          description: Time of the live provider observation used for this preview.
+    OrderAccepted:
+      type: object
+      additionalProperties: false
+      required: [order_id, client_order_id, status, reserved_amount_sun, currency, created_at]
+      properties:
+        order_id:
+          type: string
+          pattern: '^ord_[a-z2-7]+$'
+          example: ord_xxxxx
+        client_order_id:
+          type: string
+          example: merchant-order-001
+        status:
+          type: string
+          enum: [PROCESSING, CONFIRMING, SUCCESS, FAILED, REVIEWING]
+        reserved_amount_sun:
+          allOf:
+            - $ref: '#/components/schemas/SunAmount'
+          description: Authoritative locked merchant price for this order.
+        currency:
+          type: string
+          enum: [TRX]
+        created_at:
+          type: string
+          format: date-time
+    Order:
+      type: object
+      additionalProperties: false
+      required: [order_id, client_order_id, status, resource_type, receiver_address, resource_amount, duration, amount_sun, currency, txid, failure_code, created_at, confirmed_at, lease_expires_at, updated_at]
+      properties:
+        order_id:
+          type: string
+          pattern: '^ord_[a-z2-7]+$'
+          description: Platform order ID used by the canonical query route.
+          example: ord_xxxxx
+        client_order_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Merchant business order ID supplied at creation.
+          example: merchant-order-001
+        status:
+          type: string
+          enum: [PROCESSING, CONFIRMING, SUCCESS, FAILED, REVIEWING]
+          description: SUCCESS is captured, FAILED is released, and REVIEWING remains reserved.
+        resource_type:
+          $ref: '#/components/schemas/ResourceType'
+        receiver_address:
+          type: string
+          minLength: 34
+          maxLength: 34
+        resource_amount:
+          type: integer
+          format: int64
+          minimum: 1
+        duration:
+          type: string
+          enum: [1h]
+        amount_sun:
+          allOf:
+            - $ref: '#/components/schemas/SunAmount'
+          description: Immutable merchant price locked when POST /orders was accepted.
+        currency:
+          type: string
+          enum: [TRX]
+        txid:
+          type: string
+          nullable: true
+        failure_code:
+          $ref: '#/components/schemas/AsyncFailureCode'
+        created_at:
+          type: string
+          format: date-time
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        lease_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 能量租赁预计到期时间；订单尚未确认时为空。
+        updated_at:
+          type: string
+          format: date-time
+    Balance:
+      type: object
+      additionalProperties: false
+      required: [currency, available_balance_sun, reserved_balance_sun, total_balance_sun, updated_at]
+      properties:
+        currency:
+          type: string
+          enum: [TRX]
+        available_balance_sun:
+          $ref: '#/components/schemas/SunAmount'
+        reserved_balance_sun:
+          $ref: '#/components/schemas/SunAmount'
+        total_balance_sun:
+          $ref: '#/components/schemas/SunAmount'
+        updated_at:
+          type: string
+          format: date-time
+    SunAmount:
+      type: string
+      pattern: '^[0-9]+$'
+      description: SUN 整数的十进制字符串，1 TRX = 1000000 SUN。
+    AsyncFailureCode:
+      type: string
+      nullable: true
+      description: Public asynchronous failure category. FAILED always means reserved funds have already been released.
+      enum:
+        - NO_AVAILABLE_ROUTE
+        - ALL_PROVIDERS_REJECTED
+        - CHAIN_TRANSACTION_NOT_FOUND
+        - DELIVERY_FAILED
+        - DELIVERY_REVIEW_REQUIRED
+        - ON_CHAIN_FAILED
+        - BROADCAST_REJECTED
+        - ACTIVATION_FAILED
+        - null
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          description: Stable machine code. Branch on code, never on message. Unknown future codes require a safe fallback.
+          enum:
+            - INVALID_ARGUMENT
+            - INVALID_JSON
+            - INVALID_REQUEST_BODY
+            - INVALID_IDEMPOTENCY_KEY
+            - INVALID_CLIENT_ORDER_ID
+            - INVALID_CLIENT_ACTIVATION_ID
+            - INVALID_ORDER_ID
+            - INVALID_ACTIVATION_ID
+            - INVALID_RESOURCE_TYPE
+            - INVALID_RESOURCE_AMOUNT
+            - INVALID_DURATION
+            - INVALID_RECEIVER_ADDRESS
+            - INVALID_ACTIVATION_ADDRESS
+            - REQUEST_TOO_LARGE
+            - INVALID_CREDENTIALS
+            - INVALID_SIGNATURE
+            - TIMESTAMP_EXPIRED
+            - NONCE_REPLAYED
+            - IP_NOT_ALLOWED
+            - INITIAL_DEPOSIT_REQUIRED
+            - ORDER_NOT_FOUND
+            - ACTIVATION_NOT_FOUND
+            - ENDPOINT_NOT_FOUND
+            - METHOD_NOT_ALLOWED
+            - IDEMPOTENCY_CONFLICT
+            - CLIENT_ORDER_ID_CONFLICT
+            - CLIENT_ACTIVATION_ID_CONFLICT
+            - INSUFFICIENT_BALANCE
+            - UNSUPPORTED_PRODUCT
+            - PRICE_UNAVAILABLE
+            - ADDRESS_ACTIVATION_UNAVAILABLE
+            - AUTH_UNAVAILABLE
+            - BALANCE_OVERFLOW
+            - INTERNAL_ERROR
+            - RATE_LIMITED
+            - RATE_LIMIT_UNAVAILABLE
+          example: INSUFFICIENT_BALANCE
+        message:
+          type: string
+          description: Safe English human-readable explanation, not a stable programmatic contract.
+        request_id:
+          type: string
+          description: Same correlation identifier as the X-Request-ID header.
+  responses:
+    BadRequest:
+      description: |
+        INVALID_ARGUMENT — Required parameters are missing or invalid. / 必填参数缺失或不合法。
+        INVALID_JSON — Body must be one JSON object with supported fields. / 请求体必须是单个 JSON 对象，且不能包含未知字段。
+        INVALID_REQUEST_BODY — Request body could not be read completely. / 请求体读取不完整或传输中断。
+        INVALID_IDEMPOTENCY_KEY — Idempotency-Key must contain 8–128 visible ASCII characters without spaces. / Idempotency-Key 须为 8–128 个可见 ASCII 字符，不含空格。
+        INVALID_CLIENT_ORDER_ID — client_order_id must contain 1–64 visible ASCII characters without spaces. / client_order_id 须为 1–64 个可见 ASCII 字符，不含空格。
+        INVALID_CLIENT_ACTIVATION_ID — client_activation_id must contain 1–64 visible ASCII characters without spaces. / client_activation_id 须为 1–64 个可见 ASCII 字符，不含空格。
+        INVALID_ORDER_ID — order_id is not a valid platform order identifier. / order_id 不是有效的平台订单编号。
+        INVALID_ACTIVATION_ID — activation_id is not a valid platform activation identifier. / activation_id 不是有效的平台激活单编号。
+        INVALID_RESOURCE_TYPE — resource_type is invalid. / resource_type 不合法。
+        INVALID_RESOURCE_AMOUNT — resource_amount must be a supported positive integer. / resource_amount 须为支持范围内的正整数。
+        INVALID_DURATION — duration is invalid. / duration 不合法。
+        INVALID_RECEIVER_ADDRESS — receiver_address must be a valid TRON mainnet address. / receiver_address 须为有效的 TRON 主网地址。
+        INVALID_ACTIVATION_ADDRESS — address must be a valid TRON mainnet address. / address 须为有效的 TRON 主网地址。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: |
+        INVALID_CREDENTIALS — Authentication headers or API credentials are missing, invalid or expired. / 鉴权头缺失、格式错误，或 API 凭据无效、停用、过期。
+        INVALID_SIGNATURE — HMAC signature verification failed. / HMAC 签名校验失败。
+        TIMESTAMP_EXPIRED — X-Timestamp is invalid or outside the allowed clock window. / X-Timestamp 格式不正确或超出允许的时间窗口。
+        NONCE_REPLAYED — This merchant has already used the nonce. / 该商户已使用过本次 nonce。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: |
+        IP_NOT_ALLOWED — The request IP is outside the credential allowlist. / 请求 IP 不在该 API 凭据的白名单内。
+        INITIAL_DEPOSIT_REQUIRED — The confirmed deposit requirement for API access has not been met. / 尚未达到 API 服务所需的已确认充值门槛。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: |
+        ORDER_NOT_FOUND — Order was not found in the authenticated merchant account. / 当前鉴权商户下未找到该订单。
+        ACTIVATION_NOT_FOUND — Activation was not found in the authenticated merchant account. / 当前鉴权商户下未找到该激活单。
+        ENDPOINT_NOT_FOUND — The requested API endpoint does not exist. / 请求的 API 路径不存在。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    MethodNotAllowed:
+      description: |
+        METHOD_NOT_ALLOWED — This endpoint does not support the HTTP method. / 该路径不支持当前 HTTP 方法。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Allow:
+          description: Comma-separated supported HTTP methods.
+          schema:
+            type: string
+            example: GET, HEAD
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: |
+        IDEMPOTENCY_CONFLICT — Idempotency-Key was used with a different request. / Idempotency-Key 已被用于不同的请求内容。
+        CLIENT_ORDER_ID_CONFLICT — client_order_id was used with a different order. / client_order_id 已被用于不同的订单。
+        CLIENT_ACTIVATION_ID_CONFLICT — client_activation_id was used with a different activation request. / client_activation_id 已被用于不同的激活请求。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RequestTooLarge:
+      description: |
+        REQUEST_TOO_LARGE — Request body exceeds 1 MiB. / 请求体超过 1 MiB。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnprocessableEntity:
+      description: |
+        INSUFFICIENT_BALANCE — Available merchant balance is insufficient. / 商户可用余额不足。
+        UNSUPPORTED_PRODUCT — The requested product is not available for this merchant. / 当前商户暂不支持所请求的产品。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: |
+        RATE_LIMITED — The merchant’s API or order submission rate limit was exceeded; this attempt did not enter business processing. / 超过该商户的 API 请求或下单频率限制；本次请求未进入业务处理。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          description: Suggested minimum delay in seconds; an uncertain POST must be reconciled before retrying.
+          schema:
+            type: integer
+            example: 5
+        X-RateLimit-Scope:
+          description: The exhausted merchant budget.
+          schema:
+            type: string
+            enum: [requests, orders]
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/RateRemaining'
+        X-OrderRateLimit-Limit:
+          $ref: '#/components/headers/OrderRateLimit'
+        X-OrderRateLimit-Remaining:
+          $ref: '#/components/headers/OrderRateRemaining'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: |
+        BALANCE_OVERFLOW — Balance is temporarily unavailable. / 余额暂时无法读取。
+        INTERNAL_ERROR — An internal server error occurred. / 服务器内部错误。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: |
+        PRICE_UNAVAILABLE — A live quote is temporarily unavailable. / 实时报价暂时不可用。
+        ADDRESS_ACTIVATION_UNAVAILABLE — Address activation is temporarily unavailable. / 地址激活服务暂时不可用。
+        AUTH_UNAVAILABLE — Authentication service is temporarily unavailable. / 鉴权服务暂时不可用，并不代表您的密钥无效。
+        RATE_LIMIT_UNAVAILABLE — The merchant rate limiter is temporarily unavailable; this attempt did not enter business processing. / 商户限流服务暂不可用；本次请求未进入业务处理。
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          description: Suggested minimum delay in seconds; an uncertain POST must be reconciled before retrying.
+          schema:
+            type: integer
+            example: 5
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
