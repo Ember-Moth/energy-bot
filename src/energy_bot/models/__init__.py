@@ -7,6 +7,7 @@
 
 from energy_bot.models.base import Base, TimestampMixin
 from energy_bot.models.order import Order, OrderStatus
+from energy_bot.models.upstream_delivery import UpstreamDelivery
 from energy_bot.models.user import User
 
-__all__ = ["Base", "Order", "OrderStatus", "TimestampMixin", "User"]
+__all__ = ["Base", "Order", "OrderStatus", "TimestampMixin", "UpstreamDelivery", "User"]

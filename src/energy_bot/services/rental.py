@@ -181,3 +181,38 @@ async def refund(session: AsyncSession, order_id: int) -> Order:
     order.status = OrderStatus.REFUNDED
     await session.flush()
     return order
+
+
+# --- 上游事件编排(webhook / 轮询共用),按 provider + upstream_order_id 定位订单 ---
+
+
+async def get_by_upstream(
+    session: AsyncSession, *, provider: str, upstream_order_id: str
+) -> Order | None:
+    order = await order_repo.get_by_upstream_order_id(session, upstream_order_id, for_update=True)
+    if order is not None and order.provider != provider:
+        return None  # 上游单号串到别家的订单,视为未匹配
+    return order
+
+
+async def handle_terminal_event(
+    session: AsyncSession,
+    order: Order,
+    *,
+    succeeded: bool,
+    upstream_txid: str = "",
+) -> Order:
+    """应用上游终态事件;重复投递或已过终态时幂等返回,不抛错。
+
+    - delegating → active / failed(正常路径);
+    - 订单已在目标终态 → 幂等成功;
+    - 其他状态(active / expired 等)说明状态被轮询先改过,保持现状并返回。
+    """
+    target = OrderStatus.ACTIVE if succeeded else OrderStatus.FAILED
+    if order.status is target:
+        return order
+    if order.status is not OrderStatus.DELEGATING:
+        return order  # 非期望状态:不流转,由调用方记日志
+    if succeeded:
+        return await activate(session, order.id, upstream_txid=upstream_txid)
+    return await fail(session, order.id)

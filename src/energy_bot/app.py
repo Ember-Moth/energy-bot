@@ -19,6 +19,7 @@ from energy_bot.middlewares.db import DbSessionMiddleware
 from energy_bot.middlewares.logging import LoggingMiddleware
 from energy_bot.web.health import register_health_routes
 from energy_bot.web.telegram import register_telegram_routes
+from energy_bot.web.tronow import register_tronow_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ async def amain(config_path: Path | None = None) -> None:
         app = web.Application()
         register_telegram_routes(app, dp, bot, hook.path, secret_token)
         register_health_routes(app)
+        register_tronow_webhook(app, settings.upstream.tronow, session_factory)
         setup_application(app, dp, bot=bot)
 
         runner = web.AppRunner(app, access_log=None)  # 访问日志交给 LoggingMiddleware,避免刷屏
