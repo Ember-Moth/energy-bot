@@ -141,6 +141,22 @@ class UpstreamSettings(BaseSettings):
     tronbid: TronbidSettings = Field(default_factory=TronbidSettings)
 
 
+class GmpaySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_GMPAY_")
+
+    base_url: str = ""  # 自部署 epusdt 实例地址;空 = 收款功能未启用
+    pid: str = "1000"  # 商户 PID(参与签名)
+    secret_key: str = ""  # 签名密钥;建议环境变量注入不落盘
+    currency: str = "trx"  # 下单币种:trx = 金额即 TRX 数量(网关 coin==base 短路,汇率 1)
+    timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
+
+
+class PaymentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ENERGY_BOT_PAYMENT_")
+
+    gmpay: GmpaySettings = Field(default_factory=GmpaySettings)
+
+
 class RentalProduct(BaseModel):
     energy_amount: int = Field(gt=0, le=2147483647)
     duration_minutes: int = Field(gt=0, le=525600)
@@ -201,6 +217,7 @@ class Settings(BaseSettings):
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
+    payment: PaymentSettings = Field(default_factory=PaymentSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     rental: RentalSettings = Field(default_factory=RentalSettings)
 
