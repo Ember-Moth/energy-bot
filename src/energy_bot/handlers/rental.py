@@ -108,6 +108,7 @@ async def balance(message: Message, session: AsyncSession) -> None:
     assert message.from_user is not None
     account = await session.get(Wallet, message.from_user.id)
     available, frozen = (account.available, account.frozen) if account else (0, 0)
+    await session.commit()
     await message.answer(f"可用余额：{available:f} TRX\n冻结金额：{frozen:f} TRX")
 
 
@@ -118,6 +119,7 @@ async def my_orders(message: Message, session: AsyncSession) -> None:
         return
     assert message.from_user is not None
     rows = await orders.list_by_user(session, message.from_user.id)
+    await session.commit()
     await message.answer("\n\n".join(_summary(row) for row in rows) or "暂无订单。")
 
 

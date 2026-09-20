@@ -7,7 +7,17 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from energy_bot.models.base import Base, TimestampMixin
@@ -32,6 +42,12 @@ class OrderStatus(enum.StrEnum):
 class Order(TimestampMixin, Base):
     __tablename__ = "orders"
     __table_args__ = (
+        Index(
+            "ix_orders_ready_queue",
+            "next_run_at",
+            "id",
+            postgresql_where=text("next_run_at IS NOT NULL"),
+        ),
         UniqueConstraint("user_id", "request_key", name="uq_order_request"),
         UniqueConstraint(
             "provider", "upstream_order_id", name="uq_orders_provider_upstream_order_id"

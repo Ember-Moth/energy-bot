@@ -1,6 +1,6 @@
 # TRONow 上游对接
 
-依据三份材料整理,冲突时以 SKILL 为准:[`.agents/tronow-connect/SKILL.md`](../../../.agents/tronow-connect/SKILL.md)(接入要求,含 webhook)、[OpenAPI 1.2.0 快照](tronow-openapi.yaml)(字段契约)、[client.mjs](tronow-client.mjs)(官方签名参考实现)。**OpenAPI 快照未覆盖 webhook,该节内容来自 SKILL。**
+接入要求参考以下材料;错误与限流语义以最新[错误码快照](tronow-errors.zh-CN.md)为准:[`.agents/tronow-connect/SKILL.md`](../../.agents/tronow-connect/SKILL.md)(接入要求,含 webhook)、[OpenAPI 1.2.0 快照](tronow-openapi.yaml)(字段契约)、[client.mjs](tronow-client.mjs)(官方签名参考实现)。**OpenAPI 快照未覆盖 webhook,该节内容来自 SKILL。**
 
 ## 概览
 
@@ -90,7 +90,14 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 - 信封错误码需显式处理:`INSUFFICIENT_BALANCE`、`IDEMPOTENCY_CONFLICT`、`CLIENT_ORDER_ID_CONFLICT`、`INITIAL_DEPOSIT_REQUIRED`、`IP_NOT_ALLOWED`、鉴权类(`INVALID_CREDENTIALS`/`INVALID_SIGNATURE`/`TIMESTAMP_EXPIRED`/`NONCE_REPLAYED`)、`PRICE_UNAVAILABLE`,未知未来码走安全兜底并保留原码;
 - 超时 / 5xx **不代表失败**:先按 `client_order_id` 查单,确认未受理才用原幂等键重试原请求;4xx(除限流)不自动重试;
 - 网关可能返回 HTML / 空响应,归入 `HTTP_ERROR` / `INVALID_RESPONSE`(客户端侧兜底码);
-- 429 带 `Retry-After` 秒数,未进入业务处理,重新生成时间戳/nonce/签名后重试。
+- 429 `RATE_LIMITED` 与 503 `RATE_LIMIT_UNAVAILABLE` 在本次业务处理前拦截;
+  这不是已受理订单的失败证据。更早请求不明确时仍先查原业务号。
+- `Retry-After` 是最低等待秒数,重试增加随机抖动,保持原编号/请求体/幂等键并更新签名材料。
+- HTTP 201/200 表示受理/重放;查询 HTTP 200、code=OK、data.status=FAILED 是正常查询结果,
+  不能把 failure_code 或上游交付限流当作商户 HTTP 429。
+- 日志记录 HTTP status、原 code 和 request_id,采购尝试持久化最近一次这些元数据。
+  非标准格式的新 code 由 raw_code 保留,同时使用 HTTP_ERROR/INVALID_RESPONSE 安全兜底;
+  两个兜底码是客户端错误,不属于上游业务错误码。
 
 ## 与本项目的映射
 
@@ -126,3 +133,31 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 超时恢复、定时查询与 `REVIEWING` 日志/用户通知。余额订单回调持久化唤醒原单查询,
 随后以完整查询结果结算;旧订单仍按前述回调直接流转。地址激活接口尚未实现。
 参见 [订单系统](../orders.md)。
+
+
+## 商户共享窗口的本地实现
+
+使用 PostgreSQL 商户行锁和最近一秒请求历史,本地默认 API 50、创建 10。
+每次实际 HTTP 尝试都申请额度;POST /orders 和 POST /address-activations 包括重试和
+幂等重放同时申请两类额度,GET 查单等只申请 API 额度。
+同商户使用同一 PostgreSQL、account_scope 和配置;未填写 scope 时所有 API Key 进入一个保守的默认商户桶,不按 key 拆分配额。
+
+配额头记录为观测快照,Limit 可收紧本地配置上限,Remaining 不授予名额。
+429 RATE_LIMITED 的 scope=orders 仅暂停创建,仍允许查单;
+scope=requests 暂停全部请求。未知范围、网关 429 和 503 限流服务故障保守暂停全部。
+这些客户端保护不能替代上游限制,尤其无法预留同商户其他系统正在消耗的额度。
+
+无单号时自动提交/恢复预算默认为 5（rental.max_submit_attempts）,包括首次提交。
+每轮恢复可能只查询而不重放,所以实际 POST 数不会超过预算。
+耗尽后继续只读查业务号,不再 POST,不换幂等键或供应商,也不凭次数释放冻结款。
+已有单号时始终仅查原单,不受提交次数预算限制。异常订单需要人工核对,
+后续查询证明已交付仍可正常结算。
+
+
+HTTP 层关闭 aiohttp 的隐式连接重试,避免复用旧 nonce 或绕过本地计额。
+每次恢复都由订单工作流发起新 HTTP 尝试。受理成功响应的 Retry-After 也会约束下一次查单。
+新增迁移 e42447497660 保存窗口历史、配额观测及采购请求诊断;部署前执行 Alembic 升级。
+
+升级时各实例须统一新的商户分组与配置;混用旧版按 key 分桶的消费者无法共享本地额度。
+`amount_sun` 是不可变锁定金额,并不表示 FAILED 订单仍有净支出;财务汇总须结合终态,
+不能仅累计失败尝试中记录的锁定金额。

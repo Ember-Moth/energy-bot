@@ -78,12 +78,42 @@ Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求
 | `products[].duration_minutes` | 必填 | 1–525600 分钟 |
 | `products[].price_trx` | 必填 | 正数销售价,最多 6 位小数,小于 1,000,000 TRX |
 | `products[].max_cost_trx` | 销售价 | 询价成本上限,不是上游成交价保证 |
-| `rental.poll_seconds` | `5` | 调度轮询间隔,1–300 秒 |
+| `rental.poll_seconds` | `5` | 未完成订单的再次查单间隔,1–300 秒 |
 | `rental.lease_seconds` | `180` | 工作租约,180–3600 秒,覆盖最大请求超时 |
-| `rental.batch_size` | `20` | 每轮最多处理的订单和通知数,1–100 |
+| `rental.batch_size` | `20` | 单轮维护/tick 的数量上限,1–100;生产消费者持续工作 |
+| `rental.max_submit_attempts` | `5` | 无上游单号时的提交/恢复预算,1–100;耗尽转核对,不解冻或换单 |
 | `rental.quote_retry_limit` | `3` | 无可采购报价的尝试次数,1–100;耗尽解冻 |
+| `rental.order_concurrency` | `8` | 每进程采购消费者数,1–64 |
+| `rental.notification_concurrency` | `4` | 每进程通知消费者数,1–32,独立于采购 |
+| `rental.idle_poll_seconds` | `1` | 队列为空时等待,0.05–30 秒 |
+| `rental.quote_cache_seconds` | `2` | 报价缓存 TTL,0–10 秒;0 关闭 |
+| `rental.balance_cache_seconds` | `1` | 上游余额缓存 TTL,0–5 秒;0 关闭 |
+| `rental.upstream_concurrency` | `4` | 每进程每供应商 HTTP 并发,1–32 |
+| `rental.upstream_requests_per_second` | `20` | TronBid 同商户跨进程总请求平滑速率,1–1000 |
+| `rental.upstream_orders_per_second` | `5` | TronBid 同商户跨进程创建订单平滑速率,1–1000 |
 
 示例见 `config.example.yaml`,环境变量仍使用 `ENERGY_BOT_RENTAL__...` 覆盖。
 TRONow 需要 api_key 和 api_secret 才进入比价池;TronBid 需要 api_key。
 两者均使用经营者的上游预存余额。用户充值渠道不在此配置中。
 完整流程、异常恢复和资金语义见 [订单系统](orders.md)。
+
+
+### TRONow 商户限流
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `upstream.tronow.account_scope` | 空 | 本地商户分组,不发送上游;空时所有 TRONow key 共用默认桶 |
+| `upstream.tronow.request_limit` | `50` | 本地滚动 1 秒 API 上限,1–1000 |
+| `upstream.tronow.order_limit` | `10` | 本地滚动 1 秒创建上限,1–1000;订单和地址激活合计 |
+
+TRONow 以商户共享配额,同商户所有 API Key/服务实例应使用相同 account_scope、限额和
+同一 PostgreSQL。不同商户要指定不同的本地 scope,避免默认桶造成保守的共享节流。
+它不改变由 API 凭据决定的商户身份。平台实际配额仍是最终限制。
+已观察到的 Limit 头可保守降低本地上限;Remaining 只记录快照,不作为预留令牌。
+TRONow 不使用 rental 下的平滑速率配置,这两个配置继续控制 TronBid。
+
+`upstream.tronbid.account_scope` 默认为空,空时按 API key 隔离;
+同一 TronBid 账户跨 key 的实例也应显式使用相同 scope 和速率。
+缓存始终按凭据与规格隔离,限流分组不会合并不同凭据的缓存。
+UNLOGGED 缓存只连接主库,不得用于用户账本、订单状态或采购幂等记录。
+并发及基准说明见 [性能与调度](performance.md)。

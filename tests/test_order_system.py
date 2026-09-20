@@ -380,6 +380,8 @@ async def test_notification_retry_does_not_repeat_settlement(db_factory):
     send = AsyncMock(side_effect=[TimeoutError(), None])
     service = worker(db_factory, FakeProvider(), send=send)
     await service.tick()
+    if send.await_count == 0:
+        await service.deliver_notifications()  # 通知调度独立于采购,无需同一轮完成
     async with db_factory() as session, session.begin():
         event = await session.scalar(select(OrderNotification))
         assert event.sent_at is None

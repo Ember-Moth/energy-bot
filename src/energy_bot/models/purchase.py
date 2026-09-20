@@ -3,7 +3,17 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from energy_bot.models.base import Base, TimestampMixin
@@ -28,11 +38,23 @@ class PurchaseAttempt(TimestampMixin, Base):
     upstream_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     state: Mapped[str] = mapped_column(String(24), default="submitting")
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    submit_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_raw_code: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class OrderNotification(TimestampMixin, Base):
     __tablename__ = "order_notifications"
-    __table_args__ = (UniqueConstraint("order_id", "event", name="uq_order_notification"),)
+    __table_args__ = (
+        UniqueConstraint("order_id", "event", name="uq_order_notification"),
+        Index(
+            "ix_notifications_ready_queue",
+            "next_run_at",
+            "id",
+            postgresql_where=text("sent_at IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))

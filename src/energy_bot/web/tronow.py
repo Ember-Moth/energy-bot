@@ -20,12 +20,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from energy_bot.config import TronowSettings
+from energy_bot.config import RentalSettings, TronowSettings
 from energy_bot.models import OrderStatus, UpstreamDelivery
 from energy_bot.services import rental
 from energy_bot.services.procurement import wake_tronow
 from energy_bot.services.rental import RentalError
 from energy_bot.services.upstream.tronow import TronowApiError, TronowClient, TronowOrderStatus
+from energy_bot.services.upstream_cache import cache_key
+from energy_bot.services.upstream_gate import TronowGate, UpstreamDeferred
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,16 @@ class TronowWebhookView:
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
+        self._gate = TronowGate(
+            session_factory,
+            cache_key(
+                "tronow",
+                settings.account_scope or "default-merchant",
+            ),
+            RentalSettings(),
+            request_limit=settings.request_limit,
+            order_limit=settings.order_limit,
+        )
 
     def register(self, app: web.Application, path: str) -> None:
         app.router.add_post(path, self.handle)
@@ -158,7 +170,7 @@ class TronowWebhookView:
             return expires_at
         confirmed_at = _parse_datetime(nested.get("confirmed_at"))
         if confirmed_at is None:
-            async with TronowClient(self._settings) as client:
+            async with TronowClient(self._settings, gate=self._gate) as client:
                 snapshot = await client.get_order(order_id)
             if snapshot.order_id != order_id or snapshot.status is not TronowOrderStatus.SUCCESS:
                 raise RentalError("查单结果尚未确认该订单成功")
@@ -194,12 +206,20 @@ class TronowWebhookView:
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
         if order is None:
             return "unmatched"
+        local_id = order.id
         succeeded = expected == "SUCCESS"
         txid = nested.get("txid")
         try:
             expires_at = None
             if succeeded and order.status is OrderStatus.DELEGATING:
+                # 旧订单补查也参与商户限流;等待额度/网络前先释放订单锁和连接。
+                await session.rollback()
                 expires_at = await self._lease_expiry(order_id, nested)
+                order = await rental.get_by_upstream(
+                    session, provider="tronow", upstream_order_id=order_id
+                )
+                if order is None:
+                    return "unmatched"
             await rental.handle_terminal_event(
                 session,
                 order,
@@ -207,9 +227,17 @@ class TronowWebhookView:
                 upstream_txid=txid if isinstance(txid, str) else "",
                 lease_expires_at=expires_at,
             )
-        except TypeError, ValueError, OverflowError, ClientError, TimeoutError, TronowApiError:
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+            ClientError,
+            TimeoutError,
+            TronowApiError,
+            UpstreamDeferred,
+        ):
             # 不记录异常原文,避免 HTTP 异常携带凭据或不受控响应内容。
-            logger.warning("TRONow 回调无法确认租期或完成流转: order=%s", order.id)
+            logger.warning("TRONow 回调无法确认租期或完成流转: order=%s", local_id)
             return "retry"
         return "applied"
 

@@ -26,6 +26,7 @@ uv run python -m energy_bot --config config.yaml  # 等价的模块方式
 
 - [配置说明](docs/configuration.md) — `config.yaml` 全部字段、默认值与校验行为
 - [部署指南](docs/deployment.md) — 本地隧道调试、反向代理、systemd
+- [性能与调度](docs/performance.md) — 并发队列、UNLOGGED 缓存、限流及本地对照基准
 - [开发指南](docs/development.md) — 项目结构、添加 handler、工具链
 - [提交规范](docs/commit-convention.md) — Conventional Commits(英文提交信息)
 - [上游 API 规范](docs/upstream/) — TRONow / TronBid 两家能量供应商的 OpenAPI 快照

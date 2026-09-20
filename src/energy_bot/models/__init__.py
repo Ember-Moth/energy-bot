@@ -8,6 +8,7 @@
 from energy_bot.models.base import Base, TimestampMixin
 from energy_bot.models.order import Order, OrderStatus
 from energy_bot.models.purchase import OrderNotification, PurchaseAttempt
+from energy_bot.models.upstream_cache import UpstreamCache, UpstreamThrottle
 from energy_bot.models.upstream_delivery import UpstreamDelivery
 from energy_bot.models.user import User
 from energy_bot.models.wallet import Wallet, WalletEntry
@@ -19,7 +20,9 @@ __all__ = [
     "OrderStatus",
     "PurchaseAttempt",
     "TimestampMixin",
+    "UpstreamCache",
     "UpstreamDelivery",
+    "UpstreamThrottle",
     "User",
     "Wallet",
     "WalletEntry",

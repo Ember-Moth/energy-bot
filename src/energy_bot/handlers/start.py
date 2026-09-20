@@ -26,6 +26,7 @@ async def cmd_start(message: Message, session: AsyncSession) -> None:
             first_name=message.from_user.full_name,
             language_code=message.from_user.language_code or "",
         )
+    await session.commit()  # 回复 Telegram 前释放数据库连接与用户行锁
     # 用户名可含 < > & 等任意字符,拼进 HTML 消息前必须转义
     name = html.quote(message.from_user.full_name) if message.from_user else "朋友"
     await message.answer(
@@ -47,4 +48,5 @@ async def btn_help(message: Message) -> None:
 @router.message(F.text == BTN_STATUS)
 async def btn_status(message: Message, session: AsyncSession) -> None:
     await session.execute(text("SELECT 1"))  # 数据库探活,失败会抛异常由 aiogram 记录
+    await session.commit()
     await message.answer("✅ 服务正常,数据库连接可用。")

@@ -31,10 +31,14 @@ upstream:                     # 上游能量供应商
     api_key: ""               # 商户 API Key;建议环境变量注入:ENERGY_BOT_UPSTREAM__TRONOW__API_KEY
     api_secret: ""            # 请求签名密钥;同上(...API_SECRET),与 webhook 密钥互为独立密钥
     webhook_secret: ""        # 回调验签密钥(X-Lease-Signature);留空则回调端点拒绝一切请求(503)
+    account_scope: ""         # 空时所有 TRONow key 共用默认商户桶;不发送给上游
+    request_limit: 50          # 商户滚动 1 秒 API 配额,按平台实际配置调整
+    order_limit: 10            # 订单/地址激活 POST 共用的滚动 1 秒配额
     timeout_seconds: 10       # 单请求超时(秒)
   tronbid:                    # TronBid Quick Rent API(无 webhook,纯轮询;快照见 docs/upstream/quick-rent-v2.json)
     base_url: "https://tronbid.com/api/v2/quick-rent"
     api_key: ""               # API Key(Authorization: Bearer);建议环境变量注入:ENERGY_BOT_UPSTREAM__TRONBID__API_KEY
+    account_scope: ""         # 同一商户多个 key/实例需填同一限流标识;空时按 API key 隔离
     timeout_seconds: 10       # 单请求超时(秒)
 
 logging:                     # 日志配置
@@ -52,5 +56,14 @@ rental:
   #     max_cost_trx: "4.000000" # 可选询价预算,默认销售价;上游下单才锁价
   poll_seconds: 5
   lease_seconds: 180          # 任务租约,须覆盖询价和提交的超时窗口
-  batch_size: 20
+  batch_size: 20             # 单轮维护/tick 的处理上限;生产消费者持续领取
+  max_submit_attempts: 5     # 不确定提交的自动恢复预算,耗尽保留冻结款并核对原单
   quote_retry_limit: 3        # 无可采购报价时重试次数,耗尽释放用户冻结款
+  order_concurrency: 8       # 每进程采购消费者数
+  notification_concurrency: 4 # 独立通知消费者数
+  idle_poll_seconds: 1        # 队列为空时的等待;有任务时连续消费
+  quote_cache_seconds: 2      # UNLOGGED 读缓存 TTL;0 关闭
+  balance_cache_seconds: 1    # 余额仅作候选筛选,不保证成交余额
+  upstream_concurrency: 4     # 每进程、每供应商的并发 HTTP 上限
+  upstream_requests_per_second: 20 # TronBid 商户跨进程共享的平滑请求速率
+  upstream_orders_per_second: 5    # TronBid 商户跨进程共享的下单速率

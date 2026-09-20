@@ -10,10 +10,15 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from energy_bot.config import TIMEZONE, UpstreamSettings
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from energy_bot.config import TIMEZONE, RentalSettings, UpstreamSettings
 from energy_bot.models import PurchaseAttempt
+from energy_bot.services.cached_upstream import CachedTronbidClient, CachedTronowClient
 from energy_bot.services.upstream.tronbid import TronbidClient, TronbidOrder
 from energy_bot.services.upstream.tronow import TronowApiError, TronowClient, TronowOrder
+from energy_bot.services.upstream_cache import PostgresCache, cache_key
+from energy_bot.services.upstream_gate import TronowGate, UpstreamGate
 
 SUN = Decimal(1000000)
 
@@ -47,6 +52,9 @@ class PurchaseResult:
     cost: Decimal
     expires_at: datetime | None = None
     txid: str = ""
+    retry_after: int | None = None
+    request_id: str | None = None
+    http_status: int | None = None
 
 
 class Provider(Protocol):
@@ -94,6 +102,9 @@ class TronowProvider:
             self.client.get_balance(),
         )
         quote, received_at = observed
+        cached_until = getattr(quote, "valid_until", None)
+        if cached_until is not None and cached_until <= datetime.now(TIMEZONE):
+            quote, received_at = await _observed(self.client.get_quote(product.energy))
         if (
             quote.resource_amount != product.energy
             or quote.duration != "1h"
@@ -107,7 +118,7 @@ class TronowProvider:
         return Offer(
             self.name,
             Decimal(quote.price_sun) / SUN,
-            received_at + timedelta(seconds=10),
+            getattr(quote, "valid_until", None) or received_at + timedelta(seconds=10),
         )
 
     def body(self, product: Product, business_id: str) -> str:
@@ -122,16 +133,22 @@ class TronowProvider:
         )
 
     async def submit(self, attempt: PurchaseAttempt) -> PurchaseResult:
-        result = (
-            await self.client.submit_order(
-                attempt.request_body.encode(),
-                idempotency_key=attempt.idempotency_key,
-            )
-        ).accepted
+        created = await self.client.submit_order(
+            attempt.request_body.encode(),
+            idempotency_key=attempt.idempotency_key,
+        )
+        result = created.accepted
         if result.client_order_id != attempt.business_id or result.currency != "TRX":
             raise ProviderMismatch("TRONow 受理结果身份不符")
         # 受理结果不含交付详情;包括 SUCCESS 重放也先保存单号,下一轮查询完整结果。
-        return PurchaseResult(result.order_id, "pending", Decimal(result.reserved_amount_sun) / SUN)
+        return PurchaseResult(
+            result.order_id,
+            "pending",
+            Decimal(result.reserved_amount_sun) / SUN,
+            retry_after=created.retry_after,
+            request_id=created.request_id,
+            http_status=created.http_status,
+        )
 
     def _result(self, attempt: PurchaseAttempt, result: TronowOrder) -> PurchaseResult:
         body = json.loads(attempt.request_body)
@@ -154,7 +171,14 @@ class TronowProvider:
         if state == "success" and expiry is None:
             state = "reviewing"
         return PurchaseResult(
-            result.order_id, state, Decimal(result.amount_sun) / SUN, expiry, result.txid or ""
+            result.order_id,
+            state,
+            Decimal(result.amount_sun) / SUN,
+            expiry,
+            result.txid or "",
+            retry_after=result.retry_after,
+            request_id=result.request_id,
+            http_status=result.http_status,
         )
 
     async def recover(self, attempt: PurchaseAttempt) -> PurchaseResult:
@@ -163,7 +187,7 @@ class TronowProvider:
         try:
             result = await self.client.get_order_by_client_id(attempt.business_id)
         except TronowApiError as exc:
-            if exc.code != "ORDER_NOT_FOUND":
+            if exc.status != 404 or exc.code != "ORDER_NOT_FOUND":
                 raise
             if attempt.state == "reviewing":
                 raise ManualReview("原请求未匹配,等待人工核对") from exc
@@ -191,6 +215,14 @@ class TronbidProvider:
             self.client.get_balance(),
         )
         quote, received_at = observed
+        cached_until = getattr(quote, "valid_until", None)
+        if cached_until is not None and cached_until <= datetime.now(TIMEZONE):
+            quote, received_at = await _observed(
+                self.client.create_quote(
+                    energy_amount=product.energy,
+                    duration_minutes=product.minutes,
+                )
+            )
         if (
             not quote.available
             or quote.expires_in_sec <= 0
@@ -200,7 +232,8 @@ class TronbidProvider:
         return Offer(
             self.name,
             quote.price_trx,
-            received_at + timedelta(seconds=min(quote.expires_in_sec, 30)),
+            getattr(quote, "valid_until", None)
+            or received_at + timedelta(seconds=min(quote.expires_in_sec, 30)),
         )
 
     def body(self, product: Product, business_id: str) -> str:
@@ -252,10 +285,41 @@ class TronbidProvider:
         return await self.submit(attempt)
 
 
-def build_providers(settings: UpstreamSettings) -> dict[str, Provider]:
+def build_providers(
+    settings: UpstreamSettings,
+    factory: async_sessionmaker[AsyncSession] | None = None,
+    rental: RentalSettings | None = None,
+) -> dict[str, Provider]:
     providers: dict[str, Provider] = {}
+    rental = rental or RentalSettings()
+    cache = PostgresCache(factory) if factory is not None else None
     if settings.tronow.api_key and settings.tronow.api_secret:
-        providers["tronow"] = TronowProvider(TronowClient(settings.tronow))
+        config = settings.tronow
+        client = TronowClient(config)
+        if factory is not None and cache is not None:
+            scope = cache_key("tronow", config.account_scope or "default-merchant")
+            client = CachedTronowClient(
+                config,
+                cache,
+                rental,
+                TronowGate(
+                    factory,
+                    scope,
+                    rental,
+                    request_limit=config.request_limit,
+                    order_limit=config.order_limit,
+                ),
+            )
+        providers["tronow"] = TronowProvider(client)
     if settings.tronbid.api_key:
-        providers["tronbid"] = TronbidProvider(TronbidClient(settings.tronbid))
+        config_bid = settings.tronbid
+        client_bid = TronbidClient(config_bid)
+        if factory is not None and cache is not None:
+            scope = cache_key(
+                "tronbid", config_bid.base_url, config_bid.account_scope or config_bid.api_key
+            )
+            client_bid = CachedTronbidClient(
+                config_bid, cache, rental, UpstreamGate(factory, scope, rental)
+            )
+        providers["tronbid"] = TronbidProvider(client_bid)
     return providers

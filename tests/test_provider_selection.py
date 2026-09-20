@@ -1,11 +1,13 @@
 """报价资格与实际交付规格不能被最低价选择忽略。"""
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from energy_bot.config import TIMEZONE
 from energy_bot.models import PurchaseAttempt
 from energy_bot.services.providers import Product, TronbidProvider, TronowProvider
 from energy_bot.services.upstream.tronbid import TronbidClient
@@ -57,3 +59,26 @@ async def test_tronbid_partial_delivery_requires_review():
         amount_trx=Decimal("1"),
     )
     assert (await provider.submit(attempt)).state == "reviewing"
+
+
+async def test_quote_expired_while_waiting_balance_is_refreshed():
+    now = datetime.now(TIMEZONE)
+    expired = SimpleNamespace(
+        available=True,
+        price_trx=Decimal("2"),
+        expires_in_sec=30,
+        valid_until=now - timedelta(seconds=1),
+    )
+    fresh = SimpleNamespace(
+        available=True,
+        price_trx=Decimal("3"),
+        expires_in_sec=30,
+        valid_until=now + timedelta(seconds=2),
+    )
+    client = AsyncMock(spec=TronbidClient)
+    client.create_quote.side_effect = [expired, fresh]
+    client.get_balance.return_value = SimpleNamespace(balance_trx=Decimal("10"))
+    offer = await TronbidProvider(client).quote(Product(ADDRESS, 65000, 60))
+    assert offer is not None and offer.cost == Decimal("3")
+    assert offer.valid_until == fresh.valid_until
+    assert client.create_quote.await_count == 2

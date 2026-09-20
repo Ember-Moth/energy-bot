@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Literal
@@ -23,6 +24,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from energy_bot.config import TronbidSettings
+from energy_bot.services.upstream_gate import UpstreamGate
 
 _IDEMPOTENCY_RE = re.compile(r"^.{8,128}$", re.DOTALL)  # 规范仅约束长度 8-128
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
@@ -72,6 +74,7 @@ class TronbidQuote:
     available: bool
     save_percent: float | None
     expires_in_sec: int
+    valid_until: datetime | None = None  # 本地读缓存的有效期,不是上游锁价
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +152,9 @@ def _parse_order(data: Any) -> TronbidOrder:
 class TronbidClient:
     """持有一个 aiohttp 会话;close() 随宿主资源栈清理。"""
 
-    def __init__(self, settings: TronbidSettings) -> None:
+    def __init__(self, settings: TronbidSettings, *, gate: UpstreamGate | None = None) -> None:
         self._settings = settings
+        self._gate = gate
         self._session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> TronbidClient:
@@ -173,7 +177,15 @@ class TronbidClient:
             raise ValueError("base_url 必须是 https:// 且路径以 /api/ 开头(仅回环地址允许 http)")
         return base
 
-    async def _request(
+    async def _request(self, method: str, resource: str, **kwargs: Any) -> Any:
+        if self._gate is None:
+            return await self._request_unlimited(method, resource, **kwargs)
+        return await self._gate.run(
+            lambda: self._request_unlimited(method, resource, **kwargs),
+            creation=method.upper() == "POST" and resource == "orders",
+        )
+
+    async def _request_unlimited(
         self, method: str, resource: str, *, data: Any = None, raw_body: bytes | None = None
     ) -> Any:
         method = method.upper()
@@ -191,6 +203,8 @@ class TronbidClient:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._settings.timeout_seconds)
             )
+            # 禁止 aiohttp 复用旧鉴权头内部重试;队列负责计额并生成新的签名材料。
+            self._session._retry_connection = False
         response = await self._session.request(
             method,
             url,

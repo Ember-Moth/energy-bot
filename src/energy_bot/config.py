@@ -119,6 +119,9 @@ class TronowSettings(BaseSettings):
     api_key: str = ""  # 商户 API Key;建议环境变量注入不落盘
     api_secret: str = ""  # 请求签名密钥;与 webhook 密钥是两个独立密钥
     webhook_secret: str = ""  # 回调验签密钥(X-Lease-Signature);建议环境变量注入不落盘
+    account_scope: str = ""  # 空时所有 TRONow key 共用默认商户桶
+    request_limit: int = Field(default=50, ge=1, le=1000)
+    order_limit: int = Field(default=10, ge=1, le=1000)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
 
 
@@ -127,6 +130,7 @@ class TronbidSettings(BaseSettings):
 
     base_url: str = "https://tronbid.com/api/v2/quick-rent"
     api_key: str = ""  # API Key(Authorization: Bearer);建议环境变量注入不落盘
+    account_scope: str = ""  # 同一商户使用多个 API key 时配置相同限流标识
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)  # 单请求超时
 
 
@@ -151,6 +155,15 @@ class RentalSettings(BaseModel):
     lease_seconds: int = Field(default=180, ge=180, le=3600)
     batch_size: int = Field(default=20, ge=1, le=100)
     quote_retry_limit: int = Field(default=3, ge=1, le=100)
+    max_submit_attempts: int = Field(default=5, ge=1, le=100)
+    order_concurrency: int = Field(default=8, ge=1, le=64)
+    notification_concurrency: int = Field(default=4, ge=1, le=32)
+    idle_poll_seconds: float = Field(default=1, ge=0.05, le=30)
+    quote_cache_seconds: float = Field(default=2, ge=0, le=10)
+    balance_cache_seconds: float = Field(default=1, ge=0, le=5)
+    upstream_concurrency: int = Field(default=4, ge=1, le=32)
+    upstream_requests_per_second: float = Field(default=20, ge=1, le=1000)
+    upstream_orders_per_second: float = Field(default=5, ge=1, le=1000)
 
     @field_validator("products")
     @classmethod

@@ -100,7 +100,7 @@ async def amain(config_path: Path | None = None) -> None:
 
             worker = OrderWorker(
                 session_factory,
-                build_providers(settings.upstream),
+                build_providers(settings.upstream, session_factory, settings.rental),
                 settings.rental,
                 send_order_message,
             )

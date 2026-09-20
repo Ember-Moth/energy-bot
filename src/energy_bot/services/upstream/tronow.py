@@ -13,10 +13,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlparse
@@ -24,6 +26,10 @@ from urllib.parse import parse_qsl, quote, urlparse
 import aiohttp
 
 from energy_bot.config import TronowSettings
+from energy_bot.services.upstream.metadata import RateLimitSnapshot, integer_header
+from energy_bot.services.upstream_gate import UpstreamGate
+
+logger = logging.getLogger(__name__)
 
 _CLIENT_ORDER_RE = re.compile(r"^[\x21-\x7e]{1,64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[\x21-\x7e]{8,128}$")
@@ -41,12 +47,21 @@ class TronowApiError(RuntimeError):
         request_id: str | None = None,
         retry_after: int | None = None,
         message: str = "",
+        *,
+        raw_code: str | None = None,
+        rate_limits: RateLimitSnapshot | None = None,
     ) -> None:
         super().__init__(message or code)
         self.code = code
         self.status = status
         self.request_id = request_id
         self.retry_after = retry_after
+        self.raw_code = (
+            raw_code
+            if raw_code is not None
+            else (code if code not in ("HTTP_ERROR", "INVALID_RESPONSE") else None)
+        )
+        self.rate_limits = rate_limits or RateLimitSnapshot()
 
     def __str__(self) -> str:
         parts = [self.code]
@@ -57,6 +72,40 @@ class TronowApiError(RuntimeError):
         if self.retry_after is not None:
             parts.append(f"retry_after={self.retry_after}s")
         return " ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class TronowResponse:
+    data: Any
+    status: int
+    request_id: str | None
+    retry_after: int | None
+    location: str | None
+    rate_limits: RateLimitSnapshot
+
+
+def _log_error(error: TronowApiError) -> TronowApiError:
+    logger.warning(
+        "TRONow 请求失败: status=%s code=%r request_id=%r scope=%s",
+        error.status,
+        error.raw_code or error.code,
+        error.request_id,
+        error.rate_limits.scope,
+    )
+    return error
+
+
+def _invalid_data(response: TronowResponse) -> TronowApiError:
+    return _log_error(
+        TronowApiError(
+            "INVALID_RESPONSE",
+            response.status,
+            response.request_id,
+            response.retry_after,
+            raw_code="OK",
+            rate_limits=response.rate_limits,
+        )
+    )
 
 
 def _query_encode(value: str) -> str:
@@ -112,6 +161,7 @@ class TronowQuote:
     price_sun: int
     currency: str
     priced_at: str
+    valid_until: datetime | None = None  # 本地读缓存的有效期,不是上游锁价
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +189,9 @@ class TronowOrder:
     created_at: str
     confirmed_at: str | None
     lease_expires_at: str | None
+    request_id: str | None = None
+    retry_after: int | None = None
+    http_status: int = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +208,7 @@ class CreatedOrder:
     accepted: TronowOrderAccepted
     request_id: str | None
     retry_after: int | None
+    http_status: int = 201
 
 
 def _sun(value: Any, field: str) -> int:
@@ -168,7 +222,8 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _parse_order(data: Any) -> TronowOrder:
+def _parse_order(response: TronowResponse) -> TronowOrder:
+    data = response.data
     try:
         return TronowOrder(
             order_id=data["order_id"],
@@ -184,16 +239,21 @@ def _parse_order(data: Any) -> TronowOrder:
             created_at=data["created_at"],
             confirmed_at=_opt_str(data.get("confirmed_at")),
             lease_expires_at=_opt_str(data.get("lease_expires_at")),
+            request_id=response.request_id,
+            retry_after=response.retry_after,
+            http_status=response.status,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise TronowApiError("INVALID_RESPONSE", message=f"订单字段缺失或非法:{exc}") from exc
+    except (KeyError, TypeError, ValueError, TronowApiError) as exc:
+        raise _invalid_data(response) from exc
 
 
 class TronowClient:
     """持有一个 aiohttp 会话;close() 随宿主资源栈清理。"""
 
-    def __init__(self, settings: TronowSettings) -> None:
+    def __init__(self, settings: TronowSettings, *, gate: UpstreamGate | None = None) -> None:
         self._settings = settings
+        self._gate = gate
+        self.last_rate_limits = RateLimitSnapshot()
         self._session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> TronowClient:
@@ -223,7 +283,16 @@ class TronowClient:
             )
         return base, parsed.path
 
-    async def _request(
+    async def _request(self, method: str, resource: str, **kwargs: Any) -> TronowResponse:
+        if self._gate is None:
+            return await self._request_unlimited(method, resource, **kwargs)
+        return await self._gate.run(
+            lambda: self._request_unlimited(method, resource, **kwargs),
+            creation=method.upper() == "POST"
+            and resource.split("?", 1)[0].strip("/") in ("orders", "address-activations"),
+        )
+
+    async def _request_unlimited(
         self,
         method: str,
         resource: str,
@@ -232,7 +301,7 @@ class TronowClient:
         params: dict[str, str] | None = None,
         idempotency_key: str = "",
         raw_body: bytes | None = None,
-    ) -> tuple[Any, str | None, str | None, int | None]:
+    ) -> TronowResponse:
         method = method.upper()
         if method == "POST" and not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise ValueError("POST 需要 8-128 位可见 ASCII 的稳定幂等键")
@@ -282,19 +351,34 @@ class TronowClient:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._settings.timeout_seconds)
             )
-        response = await self._session.request(
-            method,
-            url,
-            data=body if method == "POST" else None,
-            headers=headers,
-            allow_redirects=False,
-        )
-        return await _parse_response(response)
+            # 禁止 aiohttp 复用旧鉴权头内部重试;队列负责计额并生成新的签名材料。
+            self._session._retry_connection = False
+        try:
+            async with self._session.request(
+                method,
+                url,
+                data=body if method == "POST" else None,
+                headers=headers,
+                allow_redirects=False,
+            ) as response:
+                snapshot = RateLimitSnapshot.from_headers(response.headers)
+                self.last_rate_limits = snapshot
+                try:
+                    return await _parse_response(response, snapshot)
+                finally:
+                    if self._gate is not None:
+                        try:
+                            await self._gate.observe(snapshot)
+                        except Exception as exc:
+                            # 观测失败不能覆盖已受理订单的真实 HTTP 结果。
+                            logger.warning("TRONow 配额快照保存失败: %s", type(exc).__name__)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise _log_error(TronowApiError("HTTP_ERROR")) from exc
 
     # --- 业务接口 ---
 
     async def get_quote(self, resource_amount: int) -> TronowQuote:
-        data, _, _, _ = await self._request(
+        response = await self._request(
             "GET",
             "prices/quote",
             params={
@@ -303,6 +387,7 @@ class TronowClient:
                 "duration": "1h",
             },
         )
+        data = response.data
         try:
             return TronowQuote(
                 resource_amount=int(data["resource_amount"]),
@@ -311,8 +396,8 @@ class TronowClient:
                 currency=data["currency"],
                 priced_at=data["priced_at"],
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise TronowApiError("INVALID_RESPONSE", message=f"报价字段缺失或非法:{exc}") from exc
+        except (KeyError, TypeError, ValueError, TronowApiError) as exc:
+            raise _invalid_data(response) from exc
 
     async def create_order(
         self,
@@ -343,9 +428,10 @@ class TronowClient:
 
     async def submit_order(self, body: bytes, *, idempotency_key: str) -> CreatedOrder:
         """发送已持久化的精确请求字节;恢复时不得重新生成业务标识或载荷。"""
-        data, request_id, _, retry_after = await self._request(
+        response = await self._request(
             "POST", "orders", raw_body=body, idempotency_key=idempotency_key
         )
+        data = response.data
         try:
             accepted = TronowOrderAccepted(
                 order_id=data["order_id"],
@@ -355,22 +441,26 @@ class TronowClient:
                 currency=data["currency"],
                 created_at=data["created_at"],
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise TronowApiError("INVALID_RESPONSE", message=f"受理字段缺失或非法:{exc}") from exc
-        return CreatedOrder(accepted=accepted, request_id=request_id, retry_after=retry_after)
+        except (KeyError, TypeError, ValueError, TronowApiError) as exc:
+            raise _invalid_data(response) from exc
+        return CreatedOrder(
+            accepted=accepted,
+            request_id=response.request_id,
+            retry_after=response.retry_after,
+            http_status=response.status,
+        )
 
     async def get_order(self, order_id: str) -> TronowOrder:
-        data, _, _, _ = await self._request("GET", f"orders/{order_id}")
-        return _parse_order(data)
+        response = await self._request("GET", f"orders/{order_id}")
+        return _parse_order(response)
 
     async def get_order_by_client_id(self, client_order_id: str) -> TronowOrder:
-        data, _, _, _ = await self._request(
-            "GET", "orders", params={"client_order_id": client_order_id}
-        )
-        return _parse_order(data)
+        response = await self._request("GET", "orders", params={"client_order_id": client_order_id})
+        return _parse_order(response)
 
     async def get_balance(self) -> TronowBalance:
-        data, _, _, _ = await self._request("GET", "account/balance")
+        response = await self._request("GET", "account/balance")
+        data = response.data
         try:
             return TronowBalance(
                 currency=data["currency"],
@@ -379,36 +469,62 @@ class TronowClient:
                 total_balance_sun=_sun(data["total_balance_sun"], "total_balance_sun"),
                 updated_at=data["updated_at"],
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise TronowApiError("INVALID_RESPONSE", message=f"余额字段缺失或非法:{exc}") from exc
+        except (KeyError, TypeError, ValueError, TronowApiError) as exc:
+            raise _invalid_data(response) from exc
 
 
 async def _parse_response(
     response: aiohttp.ClientResponse,
-) -> tuple[Any, str | None, str | None, int | None]:
-    """信封解析:ok + code=OK + 有 data 才算成功;网关异常归 HTTP_ERROR / INVALID_RESPONSE。"""
-    raw = await response.read()
+    snapshot: RateLimitSnapshot | None = None,
+) -> TronowResponse:
+    """解析 JSON 或网关错误,所有异常保留原 HTTP 元数据,不按 message 分支。"""
+    snapshot = snapshot or RateLimitSnapshot.from_headers(response.headers)
+    request_id = response.headers.get("X-Request-ID")
+    retry_after = integer_header(response.headers.get("Retry-After"))
+    try:
+        raw = await response.read()
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _log_error(
+            TronowApiError(
+                "HTTP_ERROR", response.status, request_id, retry_after, rate_limits=snapshot
+            )
+        ) from exc
     try:
         envelope: Any = json.loads(raw) if raw else None
     except json.JSONDecodeError, UnicodeDecodeError:
         envelope = None
-    structured = (
+    raw_code = envelope.get("code") if isinstance(envelope, dict) else None
+    raw_code = raw_code if isinstance(raw_code, str) else None
+    structured = raw_code is not None and bool(_ENVELOPE_CODE_RE.fullmatch(raw_code))
+    if (
         isinstance(envelope, dict)
-        and isinstance(envelope.get("code"), str)
-        and bool(_ENVELOPE_CODE_RE.fullmatch(envelope["code"]))
-    )
-    request_id = (
-        envelope.get("request_id")
-        if structured and isinstance(envelope.get("request_id"), str)
-        else response.headers.get("X-Request-ID")
-    )
-    retry_after_raw = response.headers.get("Retry-After")
-    retry_after = int(retry_after_raw) if retry_after_raw and retry_after_raw.isdigit() else None
+        and isinstance(envelope.get("request_id"), str)
+        and envelope["request_id"]
+    ):
+        request_id = envelope["request_id"]
     ok = 200 <= response.status < 300
-    if not (ok and structured and envelope["code"] == "OK" and "data" in envelope):
-        if not ok:
-            code = envelope["code"] if structured and envelope["code"] != "OK" else "HTTP_ERROR"
-        else:
-            code = "INVALID_RESPONSE"
-        raise TronowApiError(code, response.status, request_id, retry_after)
-    return envelope["data"], request_id, response.headers.get("Location"), retry_after
+    if not (ok and structured and raw_code == "OK" and "data" in envelope):
+        code = (
+            (raw_code if structured and raw_code != "OK" else "HTTP_ERROR")
+            if not ok
+            else "INVALID_RESPONSE"
+        )
+        assert code is not None
+        raise _log_error(
+            TronowApiError(
+                code,
+                response.status,
+                request_id,
+                retry_after,
+                raw_code=raw_code,
+                rate_limits=snapshot,
+            )
+        )
+    return TronowResponse(
+        envelope["data"],
+        response.status,
+        request_id,
+        retry_after,
+        response.headers.get("Location"),
+        snapshot,
+    )
