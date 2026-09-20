@@ -49,10 +49,13 @@ async def get_by_upstream_order_id(
     session: AsyncSession,
     upstream_order_id: str,
     *,
+    provider: str,
     for_update: bool = False,
 ) -> Order | None:
     """按上游单号对账(回调匹配采购结果)。"""
-    stmt = select(Order).where(Order.upstream_order_id == upstream_order_id)
+    stmt = select(Order).where(
+        Order.provider == provider, Order.upstream_order_id == upstream_order_id
+    )
     if for_update:
         stmt = stmt.with_for_update()
     return (await session.execute(stmt)).scalar_one_or_none()

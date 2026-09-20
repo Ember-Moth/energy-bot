@@ -10,13 +10,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import yaml
 from platformdirs import user_config_dir
 from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from sqlalchemy import URL
 
 DEFAULT_CONFIG_NAME = "config.yaml"
 CONFIG_ENV = "ENERGY_BOT_CONFIG"
@@ -101,10 +101,14 @@ class DatabaseSettings(BaseSettings):
                 "需配置 address/username/database,"
                 "或用环境变量 ENERGY_BOT_DATABASE__DSN 提供完整连接串"
             )
-        auth = quote_plus(self.username)
-        if self.password:
-            auth += f":{quote_plus(self.password)}"
-        return f"postgresql://{auth}@{self.address}:{self.port}/{self.database}"
+        return URL.create(
+            "postgresql",
+            username=self.username,
+            password=self.password or None,
+            host=self.address,
+            port=self.port,
+            database=self.database,
+        ).render_as_string(hide_password=False)
 
 
 class TronowSettings(BaseSettings):

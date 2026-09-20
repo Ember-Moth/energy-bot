@@ -100,7 +100,7 @@ class TronbidBalance:
 
 def _trx(value: Any, field: str) -> Decimal:
     """TRX 金额字段:必须是非负十进制字符串;拒绝科学计数法、负数与 NaN/Infinity。"""
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value) is None:
         raise TronbidApiError("INVALID_RESPONSE", message=f"TRX 字段非法:{field}={value!r}")
     try:
         amount = Decimal(value)
@@ -273,7 +273,7 @@ async def _parse_response(response: aiohttp.ClientResponse) -> Any:
     raw = await response.read()
     try:
         payload: Any = json.loads(raw) if raw else None
-    except json.JSONDecodeError:
+    except json.JSONDecodeError, UnicodeDecodeError:
         payload = None
     retry_after_raw = response.headers.get("Retry-After")
     retry_after = int(retry_after_raw) if retry_after_raw and retry_after_raw.isdigit() else None
@@ -284,5 +284,5 @@ async def _parse_response(response: aiohttp.ClientResponse) -> Any:
         message = payload.get("message", "") if isinstance(payload, dict) else ""
         raise TronbidApiError(code, response.status, retry_after, message)
     if not isinstance(payload, dict):
-        raise TronbidApiError("INVALID_RESPONSE", status=response.status)
+        raise TronbidApiError("INVALID_RESPONSE", status=response.status, retry_after=retry_after)
     return payload

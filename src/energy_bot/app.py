@@ -87,7 +87,7 @@ async def amain(config_path: Path | None = None) -> None:
         await bot.set_webhook(
             webhook_url,
             secret_token=secret_token,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         resources.push_async_callback(bot.delete_webhook)
         logger.info("webhook 已注册: %s", webhook_url)

@@ -297,11 +297,11 @@ async def test_bad_gateway_is_http_error(fake: tuple[TestClient, dict[str, str]]
 # --- 客户端侧防线 ---
 
 
-async def test_short_client_order_id_rejected() -> None:
+async def test_long_client_order_id_rejected() -> None:
     async with TronowClient(TronowSettings(api_key=API_KEY, api_secret=API_SECRET)) as client:
         with pytest.raises(ValueError, match="client_order_id"):
             await client.create_order(
-                client_order_id="short", receiver_address=ADDRESS, resource_amount=65000
+                client_order_id="x" * 65, receiver_address=ADDRESS, resource_amount=65000
             )
 
 
@@ -323,3 +323,9 @@ def test_upstream_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.upstream.tronow.api_key == "from-env"
     assert settings.upstream.tronow.base_url == "https://api.tronow.io/openapi/v1"
     assert settings.upstream.tronow.timeout_seconds == 10.0
+
+
+@pytest.mark.parametrize("value", ["²", "１２", "1e3", "-1", "1.0"])
+def test_sun_rejects_non_ascii_integer(value: str) -> None:
+    with pytest.raises(TronowApiError, match="INVALID_RESPONSE"):
+        tronow._sun(value, "price_sun")

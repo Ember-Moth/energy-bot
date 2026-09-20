@@ -16,3 +16,10 @@
 - **TronBid** 按 `energy_amount` + `duration_minutes` 计价(TRX 字符串),支持 `onchain` / `balance` 两种支付模式,订单状态含 `pending_payment`(链上待付),支持取消与设置付款地址。
 
 实现上游客户端时放在 `src/energy_bot/services/upstream/`,订单状态映射到我们的 `OrderStatus`(见 `services/rental.py`);TRONow 接入的完整要求(签名细节、恢复策略、验收清单)见 `.agents/tronow-connect/SKILL.md`。
+
+## 当前覆盖范围
+
+TRONow 已有报价、下单、查单、余额与终态回调;TronBid 已有报价、下单、查单、取消、
+设置付款地址和余额。TRONow 地址激活、TronBid calculator 尚未封装。
+采购编排、轮询补偿及告警尚未实现;TronBid 客户端支持分钟级租期,本地订单目前只支持整数小时,
+不能直接用于 15 分钟等产品。以上 OpenAPI 文件是协议快照,不是已实现功能清单。

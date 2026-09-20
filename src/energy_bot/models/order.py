@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from energy_bot.models.base import Base, TimestampMixin
@@ -30,6 +30,11 @@ class OrderStatus(enum.StrEnum):
 
 class Order(TimestampMixin, Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "upstream_order_id", name="uq_orders_provider_upstream_order_id"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)

@@ -18,11 +18,10 @@ from energy_bot.config import (
     load_settings,
     resolve_config_path,
 )
-from energy_bot.db import create_engine_from_dsn, create_session_factory
 from energy_bot.handlers import routers
 from energy_bot.logging_config import setup_logging
 from energy_bot.middlewares.logging import LoggingMiddleware
-from energy_bot.models import Base, Order, OrderStatus, User
+from energy_bot.models import Order, OrderStatus, User
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:
@@ -206,15 +205,11 @@ def test_invalid_log_level_exits(tmp_path: Path) -> None:
     not os.environ.get("ENERGY_BOT_TEST_DSN"),
     reason="需要 ENERGY_BOT_TEST_DSN 指向可用的 PostgreSQL(测试库,数据会被清空)",
 )
-async def test_models_roundtrip() -> None:
-    engine = create_engine_from_dsn(os.environ["ENERGY_BOT_TEST_DSN"])
-    async with engine.connect() as conn:
-        tz = (await conn.execute(text("SELECT current_setting('TimeZone')"))).scalar_one()
-        assert tz == "Asia/Shanghai"  # 连接时区与项目统一(东八区)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    factory = create_session_factory(engine)
+async def test_models_roundtrip(db_factory) -> None:
+    factory = db_factory
+    async with factory() as session:
+        tz = (await session.execute(text("SELECT current_setting('TimeZone')"))).scalar_one()
+        assert tz == "Asia/Shanghai"
     async with factory() as session:
         session.add(User(id=1, first_name="测试", language_code="zh"))
         await session.flush()
@@ -235,7 +230,6 @@ async def test_models_roundtrip() -> None:
         assert order.user.first_name == "测试"
         assert order.price == Decimal("1.5")
         assert order.status is OrderStatus.DRAFT
-    await engine.dispose()
 
 
 def test_setup_logging_json_to_stdout_and_file(tmp_path: Path) -> None:

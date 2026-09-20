@@ -73,8 +73,15 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 2. 时间戳窗口校验(过期拒绝);
 3. body 大小上限;
 4. **delivery ID 持久化去重**(回调会重复投递,需要一张去重表);
-5. `2xx` 只在**持久化接受之后**返回,先落库再应答;
+5. `2xx` 只在**业务处理与去重记录共同提交之后**返回;未知/缺字段载荷、事件与状态矛盾返回 422,不记录 delivery;未匹配订单或暂时无法确认租期返回 503,允许重投;
 6. webhook 只覆盖两个终态;`CONFIRMING` / `REVIEWING` 仍需轮询兜底。
+
+当前接收端只接受 `order.succeeded` + `SUCCESS` 或 `order.failed` + `FAILED`。
+支持订单字段直接位于根对象或 `data` 对象;若根对象含 `event`,必须与签名头一致。
+时间戳当前按 Unix 整数秒、±5 分钟校验;上游材料未明确单位,真实联调仍需确认。
+成功通知优先使用带时区的 `lease_expires_at`,其次使用 `confirmed_at + 1h`。
+两者均缺失时只读查单补全;查单失败、状态未成功或仍无时间时返回 503,不确认送达。
+迟到通知的租期已结束时直接经状态机流转到 `expired`,不会从接收时间重新延长租期。
 
 回调 body 携带订单字段(`amount_sun` 为锁定金额);**完整 payload schema 未在材料中给出**,首次联调时以真实回调为准核对并回填本文档。
 
@@ -94,13 +101,13 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 | `order_id` | `Order.upstream_order_id` |
 | 交易哈希 | `Order.upstream_txid` |
 | `PROCESSING` / `CONFIRMING` | `delegating` |
-| `SUCCESS` | `active`(`expires_at` = 到账 + `duration_hours`) |
+| `SUCCESS` | `active` / 已过期则 `expired`;采用上游到期时间或确认时间 + 1h |
 | `FAILED` | `failed` |
 | `REVIEWING` | 保持 `delegating` + 告警,转人工 |
 | `amount_sun` | `Decimal` 换算,`price` 以 TRX 记 |
 | 金额预留语义 | 商户余额预留在 TRONow 侧,与我们订单状态机解耦 |
 
-代码落位:客户端 `services/upstream/tronow.py`;webhook 路由 `web/`(读原始 body 验签);delivery 去重表走 Alembic 迁移;轮询任务兜底。配置:`upstream.tronow` 段(base_url/api_key/secret/webhook_secret),凭据建议环境变量注入。
+代码落位:客户端 `services/upstream/tronow.py`;webhook 路由 `web/`(读原始 body 验签);delivery 去重表走 Alembic 迁移;轮询任务兜底。配置:`upstream.tronow` 段(base_url/api_key/api_secret/webhook_secret),凭据建议环境变量注入。
 
 ## 验收顺序(依 SKILL)
 
@@ -108,3 +115,13 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 2. 只读 `GET /account/balance` 连通(首次真实调用);
 3. 幂等重放、超时恢复、重复回调、余额不足、五种状态、未知错误码的模拟测试;
 4. **真实付费订单 / 地址激活前,必须获得明确授权**。
+
+## 当前实现边界
+
+客户端业务单号按 1–64 位可见 ASCII 校验,可独立传入 8–128 位 `idempotency_key`。
+不传时,长度 ≥ 8 的业务单号继续直接作为幂等键;短单号使用 `energy-bot:` + 业务单号的 SHA-256 小写十六进制摘要。
+生成键长于 64 位,与直接使用长业务单号的默认键空间分离,避免两种生成规则碰撞。重试必须保持原业务号、载荷及幂等键。
+
+目前已实现报价/下单/两种查单/余额客户端和终态回调;地址激活接口、采购请求持久化、
+超时恢复工作流、定时轮询与 `REVIEWING` 告警尚未接入应用。上述流程是接入要求,
+不代表后台任务已经存在。回调中的按需查单也不能替代定时轮询。

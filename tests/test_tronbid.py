@@ -297,7 +297,7 @@ def test_non_loopback_http_base_rejected() -> None:
 def test_trx_amount_validation() -> None:
     assert _trx("3.200000", "f") == Decimal("3.200000")
     assert _trx("0", "f") == Decimal("0")
-    for bad in ("1e3", "-1", "abc", "", None, 3.2, "NaN", "Infinity"):
+    for bad in ("1e3", "1e-3", "10e0", "+1", " 1", "-1", "abc", "", None, 3.2, "NaN", "Infinity"):
         with pytest.raises(TronbidApiError, match="INVALID_RESPONSE"):
             _trx(bad, "f")
 

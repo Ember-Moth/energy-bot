@@ -95,7 +95,7 @@ async def place_order(
         raise RentalError("energy_amount 必须为正整数")
     if duration_hours <= 0:
         raise RentalError("duration_hours 必须为正整数")
-    if price <= 0:
+    if not price.is_finite() or price <= 0:
         raise RentalError("price 必须为正数")
     return await order_repo.create_order(
         session,
@@ -143,15 +143,32 @@ async def start_delegation(
     return order
 
 
-async def activate(session: AsyncSession, order_id: int, *, upstream_txid: str = "") -> Order:
-    """能量到账:delegating → active,租期从到账时刻起算。"""
+async def activate(
+    session: AsyncSession,
+    order_id: int,
+    *,
+    upstream_txid: str = "",
+    lease_expires_at: datetime | None = None,
+    confirmed_at: datetime | None = None,
+) -> Order:
+    """按上游到期时间或确认时间激活;迟到且已过期的订单立即流转到 expired。"""
     order = await _get_locked(session, order_id)
     ensure_transition(order, OrderStatus.ACTIVE)
+    for value in (lease_expires_at, confirmed_at):
+        if value is not None and value.utcoffset() is None:
+            raise RentalError("上游租期时间必须包含时区")
+    expires_at = lease_expires_at or order.expires_at
+    if expires_at is None and confirmed_at is not None:
+        expires_at = confirmed_at + timedelta(hours=order.duration_hours)
+    if expires_at is None:
+        raise RentalError("缺少上游租期时间,必须查单确认后再激活")
     order.status = OrderStatus.ACTIVE
+    order.expires_at = expires_at
     if upstream_txid:
         order.upstream_txid = upstream_txid
-    if order.expires_at is None:
-        order.expires_at = _now() + timedelta(hours=order.duration_hours)
+    if expires_at <= _now():
+        ensure_transition(order, OrderStatus.EXPIRED)
+        order.status = OrderStatus.EXPIRED
     await session.flush()
     return order
 
@@ -189,10 +206,9 @@ async def refund(session: AsyncSession, order_id: int) -> Order:
 async def get_by_upstream(
     session: AsyncSession, *, provider: str, upstream_order_id: str
 ) -> Order | None:
-    order = await order_repo.get_by_upstream_order_id(session, upstream_order_id, for_update=True)
-    if order is not None and order.provider != provider:
-        return None  # 上游单号串到别家的订单,视为未匹配
-    return order
+    return await order_repo.get_by_upstream_order_id(
+        session, upstream_order_id, provider=provider, for_update=True
+    )
 
 
 async def handle_terminal_event(
@@ -201,6 +217,8 @@ async def handle_terminal_event(
     *,
     succeeded: bool,
     upstream_txid: str = "",
+    lease_expires_at: datetime | None = None,
+    confirmed_at: datetime | None = None,
 ) -> Order:
     """应用上游终态事件;重复投递或已过终态时幂等返回,不抛错。
 
@@ -214,5 +232,11 @@ async def handle_terminal_event(
     if order.status is not OrderStatus.DELEGATING:
         return order  # 非期望状态:不流转,由调用方记日志
     if succeeded:
-        return await activate(session, order.id, upstream_txid=upstream_txid)
+        return await activate(
+            session,
+            order.id,
+            upstream_txid=upstream_txid,
+            lease_expires_at=lease_expires_at,
+            confirmed_at=confirmed_at,
+        )
     return await fail(session, order.id)

@@ -3,11 +3,12 @@
 import os
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
-from energy_bot.db import create_engine_from_dsn, create_session_factory
-from energy_bot.models import Base, Order, OrderStatus
+from energy_bot.models import Order, OrderStatus
 from energy_bot.repositories import orders as orders_repo
 from energy_bot.repositories import users as users_repo
 from energy_bot.services import rental
@@ -77,12 +78,8 @@ def test_tron_address_checksum() -> None:
     not os.environ.get("ENERGY_BOT_TEST_DSN"),
     reason="需要 ENERGY_BOT_TEST_DSN 指向可用的 PostgreSQL(测试库,数据会被清空)",
 )
-async def test_rental_lifecycle() -> None:
-    engine = create_engine_from_dsn(os.environ["ENERGY_BOT_TEST_DSN"])
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    factory = create_session_factory(engine)
+async def test_rental_lifecycle(db_factory) -> None:
+    factory = db_factory
 
     # 下单:地址/参数校验 + draft 落库
     async with factory() as session:
@@ -121,7 +118,9 @@ async def test_rental_lifecycle() -> None:
         assert order.status is OrderStatus.DELEGATING
         assert order.delegated_at is not None
 
-        order = await rental.activate(session, order_id, upstream_txid="tx-123")
+        order = await rental.activate(
+            session, order_id, upstream_txid="tx-123", confirmed_at=rental._now()
+        )
         assert order.status is OrderStatus.ACTIVE
         assert order.upstream_txid == "tx-123"
         assert order.expires_at is not None
@@ -163,8 +162,82 @@ async def test_rental_lifecycle() -> None:
 
     # 对账与按用户查询
     async with factory() as session:
-        by_upstream = await orders_repo.get_by_upstream_order_id(session, "UP-1")
+        by_upstream = await orders_repo.get_by_upstream_order_id(
+            session, "UP-1", provider="upstream-a"
+        )
         assert by_upstream is not None and by_upstream.id == order_id
         mine = await orders_repo.list_by_user(session, 42)
         assert [o.id for o in mine] == [failed_id, order_id]  # 按创建时间倒序
-    await engine.dispose()
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_delayed_activation_uses_upstream_expiry(db_factory, expired: bool) -> None:
+    async with db_factory() as session:
+        await users_repo.upsert_user(session, user_id=1, first_name="租期测试", language_code="zh")
+        order = await rental.place_order(
+            session,
+            user_id=1,
+            recipient_address=VALID_ADDRESS,
+            energy_amount=65000,
+            duration_hours=1,
+            price=Decimal("1"),
+        )
+        await rental.mark_paid(session, order.id)
+        await rental.start_delegation(
+            session, order.id, provider="tronow", upstream_order_id="ord_time"
+        )
+        with pytest.raises(rental.RentalError, match="租期时间"):
+            await rental.activate(session, order.id)
+        assert order.status is OrderStatus.DELEGATING
+        expiry = rental._now() + timedelta(minutes=-20 if expired else 20)
+        await rental.activate(session, order.id, lease_expires_at=expiry)
+        await session.commit()
+        assert order.expires_at == expiry
+        assert order.status is (OrderStatus.EXPIRED if expired else OrderStatus.ACTIVE)
+
+
+async def test_upstream_identity_is_scoped_and_unique(db_factory) -> None:
+    async with db_factory() as session:
+        await users_repo.upsert_user(
+            session, user_id=1, first_name="唯一性测试", language_code="zh"
+        )
+        identifiers = []
+        for provider in ("tronow", "tronbid", "tronow"):
+            order = await rental.place_order(
+                session,
+                user_id=1,
+                recipient_address=VALID_ADDRESS,
+                energy_amount=65000,
+                duration_hours=1,
+                price=Decimal("1"),
+            )
+            await rental.mark_paid(session, order.id)
+            identifiers.append(order.id)
+            if len(identifiers) < 3:
+                await rental.start_delegation(
+                    session, order.id, provider=provider, upstream_order_id="same-id"
+                )
+        await session.commit()
+        for provider, order_id in zip(("tronow", "tronbid"), identifiers[:2], strict=True):
+            found = await rental.get_by_upstream(
+                session, provider=provider, upstream_order_id="same-id"
+            )
+            assert found is not None and found.id == order_id
+        with pytest.raises(IntegrityError):
+            await rental.start_delegation(
+                session, identifiers[2], provider="tronow", upstream_order_id="same-id"
+            )
+        await session.rollback()
+
+
+@pytest.mark.parametrize("price", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
+async def test_nonfinite_price_rejected_before_database(price: Decimal) -> None:
+    with pytest.raises(rental.RentalError, match="price"):
+        await rental.place_order(
+            AsyncMock(),
+            user_id=1,
+            recipient_address=VALID_ADDRESS,
+            energy_amount=65000,
+            duration_hours=1,
+            price=price,
+        )

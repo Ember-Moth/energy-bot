@@ -25,6 +25,7 @@ import aiohttp
 
 from energy_bot.config import TronowSettings
 
+_CLIENT_ORDER_RE = re.compile(r"^[\x21-\x7e]{1,64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[\x21-\x7e]{8,128}$")
 _ENVELOPE_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -158,7 +159,7 @@ class CreatedOrder:
 
 def _sun(value: Any, field: str) -> int:
     """SUN 金额字段:必须是非空十进制整数字符串。"""
-    if isinstance(value, str) and value.isdigit():
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value) is not None:
         return int(value)
     raise TronowApiError("INVALID_RESPONSE", message=f"SUN 字段非法:{field}={value!r}")
 
@@ -316,10 +317,17 @@ class TronowClient:
         client_order_id: str,
         receiver_address: str,
         resource_amount: int,
+        idempotency_key: str | None = None,
     ) -> CreatedOrder:
-        """幂等下单:client_order_id 同时作为幂等键(201 新建 / 200 重放均视为受理)。"""
-        if not _IDEMPOTENCY_RE.fullmatch(client_order_id):
-            raise ValueError("client_order_id 须为 1-64 位可见 ASCII(且作幂等键需 >= 8 位)")
+        """幂等下单:可显式传幂等键;默认保留长业务号,短业务号使用固定摘要。"""
+        if not _CLIENT_ORDER_RE.fullmatch(client_order_id):
+            raise ValueError("client_order_id 须为 1-64 位可见 ASCII")
+        if idempotency_key is None:
+            idempotency_key = (
+                client_order_id
+                if len(client_order_id) >= 8
+                else "energy-bot:" + hashlib.sha256(client_order_id.encode()).hexdigest()
+            )
         payload = {
             "client_order_id": client_order_id,
             "resource_type": "ENERGY",
@@ -328,7 +336,7 @@ class TronowClient:
             "duration": "1h",
         }
         data, request_id, _, retry_after = await self._request(
-            "POST", "orders", data=payload, idempotency_key=client_order_id
+            "POST", "orders", data=payload, idempotency_key=idempotency_key
         )
         try:
             accepted = TronowOrderAccepted(
@@ -374,7 +382,7 @@ async def _parse_response(
     raw = await response.read()
     try:
         envelope: Any = json.loads(raw) if raw else None
-    except json.JSONDecodeError:
+    except json.JSONDecodeError, UnicodeDecodeError:
         envelope = None
     structured = (
         isinstance(envelope, dict)

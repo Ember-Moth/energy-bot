@@ -93,3 +93,8 @@ uv run cz commit           # 按 Conventional Commits 交互式提交
 ## 测试
 
 pytest 已启用 `asyncio_mode = "auto"`,直接写 `async def test_...` 即可,无需装饰器。配置加载相关测试通过 `tmp_path` 写临时 YAML,不依赖真实配置文件。
+
+
+数据库集成测试使用 `ENERGY_BOT_TEST_DSN` 指定的专用测试库,执行真实 Alembic 迁移。
+测试会清空业务表,迁移回归测试还会降级至 base 后重新升级;绝不能指向开发共享库或生产库。
+未设置该变量时数据库用例跳过,因此仅运行默认 pytest 不能证明迁移和事务行为正确。

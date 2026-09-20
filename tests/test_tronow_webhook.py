@@ -1,10 +1,12 @@
 """TRONow webhook 验收:验签固定向量 + 端到端流转(需真实 PG 时走集成段)。"""
 
+import asyncio
 import hashlib
 import hmac
 import json
-import os
 import time
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -13,10 +15,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from sqlalchemy import func, select
 
-from energy_bot.config import TronowSettings
-from energy_bot.db import create_engine_from_dsn, create_session_factory
-from energy_bot.models import Base, Order, OrderStatus, UpstreamDelivery, User
+from energy_bot.config import TIMEZONE, TronowSettings
+from energy_bot.models import Order, OrderStatus, UpstreamDelivery, User
 from energy_bot.services import rental
+from energy_bot.services.upstream.tronow import TronowClient, TronowOrderStatus
 from energy_bot.web.tronow import TronowWebhookView, verify_signature
 
 WEBHOOK_SECRET = "whsec-test"
@@ -40,13 +42,14 @@ def _callback_body(
     txid: Any = "tx-hash-1",
 ) -> bytes:
     payload: dict[str, Any] = {
-        "event": "order.succeeded",
+        "event": "order.failed" if status == "FAILED" else "order.succeeded",
         "data": {
             "order_id": order_id,
             "client_order_id": client_order_id,
             "status": status,
             "amount_sun": "3250000",
             "txid": txid,
+            "lease_expires_at": (datetime.now(TIMEZONE) + timedelta(hours=1)).isoformat(),
         },
     }
     return json.dumps(payload).encode()
@@ -152,14 +155,8 @@ def test_verify_signature_rejects_missing_parts() -> None:
 
 
 @pytest.fixture
-async def webhook_client():
-    if not os.environ.get("ENERGY_BOT_TEST_DSN"):
-        pytest.skip("需要 ENERGY_BOT_TEST_DSN 指向可用的 PostgreSQL")
-    engine = create_engine_from_dsn(os.environ["ENERGY_BOT_TEST_DSN"])
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    factory = create_session_factory(engine)
+async def webhook_client(db_factory):
+    factory = db_factory
     # 预置用户 + 一条 delegating 订单
     async with factory() as session:
         session.add(User(id=1, first_name="回调测试用户"))
@@ -182,7 +179,6 @@ async def webhook_client():
     await client.start_server()
     yield client, factory
     await client.close()
-    await engine.dispose()
 
 
 def _post(
@@ -290,11 +286,11 @@ async def test_webhook_rejects_stale_timestamp(webhook_client) -> None:
     assert resp.status == 401
 
 
-async def test_webhook_ignores_nonterminal_status(webhook_client) -> None:
+async def test_webhook_rejects_nonterminal_status(webhook_client) -> None:
     http, factory = webhook_client
     resp = await _post(http, _callback_body(status="CONFIRMING"), delivery="dlv-c1")
-    assert resp.status == 200
-    assert (await resp.json())["status"] == "ignored"
+    assert resp.status == 422
+    assert (await resp.json())["status"] == "invalid"
     async with factory() as session:
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
         assert order is not None and order.status is OrderStatus.DELEGATING
@@ -323,7 +319,7 @@ async def test_webhook_concurrent_duplicate_answers_duplicate(
             UpstreamDelivery(delivery_id="dlv-race", provider="tronow", event="order.succeeded")
         )
         await session.commit()
-    monkeypatch.setattr(TronowWebhookView, "_already_seen", AsyncMock(return_value=False))
+    monkeypatch.setattr(TronowWebhookView, "_already_seen", AsyncMock(side_effect=[False, True]))
     resp = await _post(http, _callback_body(), delivery="dlv-race")
     assert resp.status == 200
     assert (await resp.json())["status"] == "duplicate"
@@ -367,3 +363,152 @@ async def test_webhook_503_when_secret_missing() -> None:
         assert resp.status == 503
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing_id", "unknown_status", "wrong_event", "wrong_body_event", "bad_data"]
+)
+async def test_invalid_callback_is_not_consumed(webhook_client, kind: str) -> None:
+    http, factory = webhook_client
+    payload = json.loads(_callback_body())
+    event = "order.succeeded"
+    if kind == "missing_id":
+        del payload["data"]["order_id"]
+    elif kind == "unknown_status":
+        payload["data"]["status"] = "FUTURE_STATE"
+    elif kind == "wrong_event":
+        event = "order.failed"
+    elif kind == "wrong_body_event":
+        payload["event"] = "order.failed"
+    else:
+        payload["data"] = []
+    response = await _post(http, json.dumps(payload).encode(), "invalid-dlv", event=event)
+    assert response.status == 422
+    async with factory() as session:
+        assert await session.get(UpstreamDelivery, "invalid-dlv") is None
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.DELEGATING
+    # 修正后的同一 delivery 可以重新处理,没有被错误去重。
+    response = await _post(http, _callback_body(), "invalid-dlv")
+    assert response.status == 200
+
+
+@pytest.mark.parametrize("timestamp", ["NaN", "inf", "-inf", "1e9", "1700000000.0"])
+async def test_invalid_timestamp_rejected_before_database(timestamp: str) -> None:
+    app = _build_app(WEBHOOK_SECRET, session_factory=None)
+    async with TestClient(TestServer(app)) as http:
+        response = await _post(
+            http,
+            b"{}",
+            "bad-ts",
+            **{
+                "X-Lease-Timestamp": timestamp,
+                "X-Lease-Signature": _sign(
+                    WEBHOOK_SECRET, timestamp, "bad-ts", "order.succeeded", b"{}"
+                ),
+            },
+        )
+        assert response.status == 401
+
+
+async def test_signed_non_utf8_callback_is_bad_request() -> None:
+    async with TestClient(TestServer(_build_app(WEBHOOK_SECRET, None))) as http:
+        response = await _post(http, b"\xff", "bad-encoding")
+        assert response.status == 400
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_callback_preserves_authoritative_expiry(webhook_client, expired: bool) -> None:
+    http, factory = webhook_client
+    payload = json.loads(_callback_body())
+    expiry = datetime.now(TIMEZONE) + timedelta(minutes=-10 if expired else 10)
+    payload["data"]["lease_expires_at"] = expiry.isoformat()
+    response = await _post(http, json.dumps(payload).encode(), "lease-dlv")
+    assert response.status == 200
+    async with factory() as session:
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.expires_at == expiry
+        assert order.status is (OrderStatus.EXPIRED if expired else OrderStatus.ACTIVE)
+
+
+async def test_missing_lease_queries_then_retries_without_consuming(
+    webhook_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http, factory = webhook_client
+    payload = json.loads(_callback_body())
+    del payload["data"]["lease_expires_at"]
+    body = json.dumps(payload).encode()
+    expiry = datetime.now(TIMEZONE) + timedelta(minutes=20)
+    query = AsyncMock(
+        side_effect=[
+            TimeoutError(),
+            SimpleNamespace(
+                order_id="ord_x1",
+                status=TronowOrderStatus.SUCCESS,
+                lease_expires_at=expiry.isoformat(),
+                confirmed_at=None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(TronowClient, "get_order", query)
+    response = await _post(http, body, "retry-lease")
+    assert response.status == 503
+    async with factory() as session:
+        assert await session.get(UpstreamDelivery, "retry-lease") is None
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.DELEGATING
+    response = await _post(http, body, "retry-lease")
+    assert response.status == 200
+    assert query.await_count == 2
+    async with factory() as session:
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.expires_at == expiry
+
+
+async def test_callback_uses_confirmation_time(webhook_client) -> None:
+    http, factory = webhook_client
+    payload = json.loads(_callback_body())
+    del payload["data"]["lease_expires_at"]
+    confirmed = datetime.now(TIMEZONE) - timedelta(minutes=40)
+    payload["data"]["confirmed_at"] = confirmed.isoformat()
+    response = await _post(http, json.dumps(payload).encode(), "confirmed-dlv")
+    assert response.status == 200
+    async with factory() as session:
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.expires_at == confirmed + timedelta(hours=1)
+
+
+async def test_concurrent_callbacks_apply_once(webhook_client) -> None:
+    http, factory = webhook_client
+    body = _callback_body()
+    responses = await asyncio.gather(*(_post(http, body, "concurrent-dlv") for _ in range(4)))
+    assert all(response.status == 200 for response in responses)
+    async with factory() as session:
+        count = await session.scalar(select(func.count()).select_from(UpstreamDelivery))
+        assert count == 1
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.ACTIVE
+
+
+@pytest.mark.parametrize("expiry", [123, "bad-time", "2026-09-20T12:00:00"])
+async def test_invalid_lease_is_not_consumed(webhook_client, expiry: Any) -> None:
+    http, factory = webhook_client
+    payload = json.loads(_callback_body())
+    payload["data"]["lease_expires_at"] = expiry
+    response = await _post(http, json.dumps(payload).encode(), "invalid-lease")
+    assert response.status == 503
+    async with factory() as session:
+        assert await session.get(UpstreamDelivery, "invalid-lease") is None
+        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
+        assert order is not None and order.status is OrderStatus.DELEGATING
+
+
+async def test_chunked_body_size_limit() -> None:
+    async def chunks():
+        for _ in range(9):
+            yield b" " * 8192
+
+    async with TestClient(TestServer(_build_app(WEBHOOK_SECRET, None))) as http:
+        response = await http.post("/upstream/tronow/webhook", data=chunks())
+        assert response.status == 413

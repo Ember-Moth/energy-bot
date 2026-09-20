@@ -1,11 +1,7 @@
-"""TRONow 订单终态回调接收端。
+"""TRONow 终态回调:验签、校验载荷、确认租期、事务流转与持久化去重。
 
-验签顺序(硬性,依 docs/upstream/tronow.md):
-读原始字节 → 大小上限 → 时间窗 → 常数时间验签 → 解析 JSON →
-delivery ID 持久化去重 → 行锁匹配订单 → 状态流转 → 落库后才 2xx。
-回调会重复投递:除首次外的投递一律幂等应答 200。
-匹配不到本地订单时应答 503 且不落去重记录——2xx 等于确认送达,
-只有非 2xx 上游才会重投,等本地落库后重投即可匹配。
+只有已完成业务处理的投递才确认送达。无效载荷、未匹配订单或查单失败
+均返回非 2xx 且不保存 delivery,让上游能够重投。
 """
 
 from __future__ import annotations
@@ -14,29 +10,27 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
-from aiohttp import web
+from aiohttp import ClientError, web
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from energy_bot.config import TronowSettings
-from energy_bot.models import UpstreamDelivery
+from energy_bot.models import OrderStatus, UpstreamDelivery
 from energy_bot.services import rental
 from energy_bot.services.rental import RentalError
-from energy_bot.services.upstream.tronow import TronowOrderStatus
+from energy_bot.services.upstream.tronow import TronowApiError, TronowClient, TronowOrderStatus
 
 logger = logging.getLogger(__name__)
 
-_MAX_BODY_BYTES = 64 * 1024  # 回调 body 上限,防滥用
-_TIMESTAMP_TOLERANCE_SECONDS = 300.0  # 时间窗 ±5 分钟
-_ORDER_STATUS_TO_SUCCEEDED: dict[TronowOrderStatus, bool] = {
-    TronowOrderStatus.SUCCESS: True,
-    TronowOrderStatus.FAILED: False,
-    # 非终态不出现在回调里;防御式映射:REVIEWING/CONFIRMING/PROCESSING 不流转
-}
+_MAX_BODY_BYTES = 64 * 1024
+_TIMESTAMP_TOLERANCE_SECONDS = 300
+_EVENT_STATUS = {"order.succeeded": "SUCCESS", "order.failed": "FAILED"}
 
 
 def verify_signature(
@@ -48,19 +42,32 @@ def verify_signature(
     signature: str,
     body: bytes,
 ) -> bool:
-    """v1=hex(HMAC-SHA256(secret, ts "." delivery "." event "." body)),常数时间比较。"""
-    if not timestamp or not delivery_id or not event or not signature.startswith("v1="):
+    """v1=hex(HMAC-SHA256(secret, ts "." delivery "." event "." body))。"""
+    if not timestamp or not delivery_id or not event:
+        return False
+    if re.fullmatch(r"v1=[0-9a-f]{64}", signature) is None:
         return False
     canonical = f"{timestamp}.{delivery_id}.{event}".encode() + b"." + body
     expected = hmac.new(secret.encode(), canonical, hashlib.sha256).hexdigest()
     return hmac.compare_digest("v1=" + expected, signature)
 
 
-def parse_timestamp(header: str) -> float | None:
-    try:
-        return float(header)
-    except ValueError:
+def parse_timestamp(header: str) -> int | None:
+    """按 Unix 秒解释回调时间戳;拒绝非整数、NaN、无穷与超长输入。"""
+    if re.fullmatch(r"[0-9]{1,12}", header) is None:
         return None
+    return int(header)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("租期时间必须是带时区的 ISO 8601 字符串")
+    parsed = datetime.fromisoformat(value)
+    if parsed.utcoffset() is None:
+        raise ValueError("租期时间缺少时区")
+    return parsed
 
 
 class TronowWebhookView:
@@ -79,59 +86,58 @@ class TronowWebhookView:
 
     async def handle(self, request: web.Request) -> web.Response:
         if not self._settings.webhook_secret:
-            # 未配置密钥时拒绝一切回调,防止误把未验证的请求当真
             return web.json_response({"error": "webhook not configured"}, status=503)
 
-        # 先查声明长度挡掉明显超限的 body(read 会把全部字节拉进内存)
-        declared = request.content_length
-        if declared is not None and declared > _MAX_BODY_BYTES:
+        if request.content_length is not None and request.content_length > _MAX_BODY_BYTES:
             return web.json_response({"error": "body too large"}, status=413)
-        body = await request.read()
-        if len(body) > _MAX_BODY_BYTES:  # 无 Content-Length(chunked)时的实际兜底
-            return web.json_response({"error": "body too large"}, status=413)
+        # 分块读取限制实际分配,也覆盖未声明长度的请求。
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(8192):
+            body.extend(chunk)
+            if len(body) > _MAX_BODY_BYTES:
+                return web.json_response({"error": "body too large"}, status=413)
+        raw = bytes(body)
 
         timestamp = request.headers.get("X-Lease-Timestamp", "")
         delivery_id = request.headers.get("X-Lease-Delivery", "")
         event = request.headers.get("X-Lease-Event", "")
         signature = request.headers.get("X-Lease-Signature", "")
-
         sent_at = parse_timestamp(timestamp)
         if sent_at is None or abs(time.time() - sent_at) > _TIMESTAMP_TOLERANCE_SECONDS:
-            logger.warning("TRONow 回调时间戳越窗: ts=%r delivery=%s", timestamp, delivery_id)
             return web.json_response({"error": "stale timestamp"}, status=401)
-
         if not verify_signature(
             self._settings.webhook_secret,
             timestamp=timestamp,
             delivery_id=delivery_id,
             event=event,
             signature=signature,
-            body=body,
+            body=raw,
         ):
-            logger.warning("TRONow 回调验签失败: delivery=%s event=%s", delivery_id, event)
             return web.json_response({"error": "invalid signature"}, status=401)
-
+        if len(delivery_id) > 128 or event not in _EVENT_STATUS:
+            return web.json_response({"error": "invalid delivery or event"}, status=422)
         try:
-            payload: dict[str, Any] = json.loads(body)
-        except json.JSONDecodeError:
+            payload: Any = json.loads(raw)
+        except json.JSONDecodeError, UnicodeDecodeError:
             return web.json_response({"error": "invalid json"}, status=400)
         if not isinstance(payload, dict):
             return web.json_response({"error": "invalid json"}, status=400)
 
-        # 重复投递幂等应答:去重记录与业务流转在同一事务内,先到者生效
         async with self._session_factory() as session:
             if await self._already_seen(session, delivery_id):
                 return web.json_response({"status": "duplicate"})
             order_view = await self._apply_event(session, event, payload)
-            if order_view == "unmatched":
-                # 不落去重记录并应答 503:上游按未送达重投,本地落库后重投即匹配
-                return web.json_response({"status": "unmatched"}, status=503)
+            if order_view != "applied":
+                status = 422 if order_view == "invalid" else 503
+                return web.json_response({"status": order_view}, status=status)
             session.add(UpstreamDelivery(delivery_id=delivery_id, provider="tronow", event=event))
             try:
                 await session.commit()
             except IntegrityError:
-                # 并发的相同 delivery 抢先落库(主键冲突):业务已幂等,按重复应答
                 await session.rollback()
+                # 仅已持久化的同一投递可以确认重复,其他约束失败必须暴露。
+                if not await self._already_seen(session, delivery_id):
+                    raise
                 return web.json_response({"status": "duplicate"})
 
         logger.info("TRONow 回调已处理: delivery=%s event=%s", delivery_id, event)
@@ -139,60 +145,68 @@ class TronowWebhookView:
 
     @staticmethod
     async def _already_seen(session: AsyncSession, delivery_id: str) -> bool:
-        if not delivery_id:
-            return False
         existing = await session.scalar(
             select(UpstreamDelivery.delivery_id).where(UpstreamDelivery.delivery_id == delivery_id)
         )
         return existing is not None
 
-    async def _apply_event(self, session: AsyncSession, event: str, payload: dict[str, Any]) -> str:
-        """匹配订单并流转;返回给 TRONow 的应答视图。
+    async def _lease_expiry(self, order_id: str, nested: dict[str, Any]) -> datetime:
+        """优先使用签名载荷的租期时间;缺失时以只读订单查询补全。"""
+        expires_at = _parse_datetime(nested.get("lease_expires_at"))
+        if expires_at is not None:
+            return expires_at
+        confirmed_at = _parse_datetime(nested.get("confirmed_at"))
+        if confirmed_at is None:
+            async with TronowClient(self._settings) as client:
+                snapshot = await client.get_order(order_id)
+            if snapshot.order_id != order_id or snapshot.status is not TronowOrderStatus.SUCCESS:
+                raise RentalError("查单结果尚未确认该订单成功")
+            expires_at = _parse_datetime(snapshot.lease_expires_at)
+            if expires_at is not None:
+                return expires_at
+            confirmed_at = _parse_datetime(snapshot.confirmed_at)
+        if confirmed_at is None:
+            raise RentalError("上游尚未返回租期时间")
+        # TRONow 当前产品固定为 1h,不能按本地通知到达时间重新起算。
+        return confirmed_at + timedelta(hours=1)
 
-        防御式解析:payload schema 官方未定稿,字段缺失或非终态只记日志、
-        应答 "ignored"(2xx);唯独 "unmatched" 交回 handle 应答 503 换取上游重投。
-        """
+    async def _apply_event(self, session: AsyncSession, event: str, payload: dict[str, Any]) -> str:
         data = payload.get("data")
+        if data is not None and not isinstance(data, dict):
+            return "invalid"
         nested = data if isinstance(data, dict) else payload
         order_id = nested.get("order_id")
-        status_raw = nested.get("status")
-        client_order_id = nested.get("client_order_id")
-        if not isinstance(order_id, str) or not order_id:
-            logger.warning("TRONow 回调缺少 order_id: event=%s keys=%s", event, sorted(payload))
-            return "ignored"
-
-        succeeded = None
-        if isinstance(status_raw, str):
-            try:
-                succeeded = _ORDER_STATUS_TO_SUCCEEDED.get(TronowOrderStatus(status_raw))
-            except ValueError:
-                succeeded = None
-        if succeeded is None:
-            logger.info("TRONow 回调事件不触发流转: event=%s status=%r", event, status_raw)
-            return "ignored"
+        expected = _EVENT_STATUS.get(event)
+        if (
+            expected is None
+            or not isinstance(order_id, str)
+            or not order_id
+            or nested.get("status") != expected
+            or ("event" in payload and payload["event"] != event)
+        ):
+            logger.warning("TRONow 回调载荷不符合终态契约: event=%s", event)
+            return "invalid"
 
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
         if order is None:
-            # 回调先于本地落库到达(或单号对不上):由 handle 应答 503 让上游重投,
-            # 重投时本地记录通常已就绪;仍匹配不上则由轮询兜底
-            logger.warning(
-                "TRONow 回调未匹配到订单: upstream_order_id=%s client_order_id=%r",
-                order_id,
-                client_order_id,
-            )
             return "unmatched"
-
-        txid_raw = nested.get("txid")
+        succeeded = expected == "SUCCESS"
+        txid = nested.get("txid")
         try:
+            expires_at = None
+            if succeeded and order.status is OrderStatus.DELEGATING:
+                expires_at = await self._lease_expiry(order_id, nested)
             await rental.handle_terminal_event(
                 session,
                 order,
                 succeeded=succeeded,
-                upstream_txid=txid_raw if isinstance(txid_raw, str) else "",
+                upstream_txid=txid if isinstance(txid, str) else "",
+                lease_expires_at=expires_at,
             )
-        except RentalError:
-            logger.exception("TRONow 回调流转失败: order=%s", order.id)
-            return "rejected"
+        except TypeError, ValueError, OverflowError, ClientError, TimeoutError, TronowApiError:
+            # 不记录异常原文,避免 HTTP 异常携带凭据或不受控响应内容。
+            logger.warning("TRONow 回调无法确认租期或完成流转: order=%s", order.id)
+            return "retry"
         return "applied"
 
 
