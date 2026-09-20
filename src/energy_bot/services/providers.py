@@ -60,6 +60,7 @@ class PurchaseResult:
 class Provider(Protocol):
     name: str
 
+    def supports(self, product: Product) -> bool: ...
     async def quote(self, product: Product) -> Offer | None: ...
     def body(self, product: Product, business_id: str) -> str: ...
     async def submit(self, attempt: PurchaseAttempt) -> PurchaseResult: ...
@@ -94,8 +95,11 @@ class TronowProvider:
     async def close(self) -> None:
         await self.client.close()
 
+    def supports(self, product: Product) -> bool:
+        return product.energy > 0 and product.minutes == 60
+
     async def quote(self, product: Product) -> Offer | None:
-        if product.minutes != 60:
+        if not self.supports(product):
             return None
         observed, balance = await asyncio.gather(
             _observed(self.client.get_quote(product.energy)),
@@ -122,6 +126,8 @@ class TronowProvider:
         )
 
     def body(self, product: Product, business_id: str) -> str:
+        if not self.supports(product):
+            raise ProviderMismatch("TRONow 仅支持正整数能量和 60 分钟租期")
         return _json(
             {
                 "client_order_id": business_id,
@@ -204,6 +210,9 @@ class TronbidProvider:
 
     async def close(self) -> None:
         await self.client.close()
+
+    def supports(self, product: Product) -> bool:
+        return product.energy > 0 and product.minutes > 0
 
     async def quote(self, product: Product) -> Offer | None:
         observed, balance = await asyncio.gather(

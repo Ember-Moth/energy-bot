@@ -33,7 +33,9 @@ class PurchaseAttempt(TimestampMixin, Base):
     business_id: Mapped[str] = mapped_column(String(64), unique=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
     request_body: Mapped[str] = mapped_column(Text)  # 精确 JSON 字节的 UTF-8 文本
-    quoted_cost: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    quoted_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )  # 直采未询价为空
     actual_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     upstream_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     state: Mapped[str] = mapped_column(String(24), default="submitting")

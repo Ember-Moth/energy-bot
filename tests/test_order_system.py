@@ -51,6 +51,9 @@ class FakeProvider:
         self.quote_continue: asyncio.Event | None = None
         self.actual_cost: Decimal | None = None
 
+    def supports(self, product: Product) -> bool:
+        return self.name != "tronow" or product.minutes == 60
+
     async def quote(self, product: Product):
         if self.quote_started is not None:
             self.quote_started.set()
@@ -239,7 +242,7 @@ async def test_no_affordable_quote_releases_frozen_funds(db_factory):
     await funded(db_factory)
     await reserve(db_factory)
     provider = FakeProvider(price="5")
-    await worker(db_factory, provider).tick()
+    await worker(db_factory, provider, FakeProvider("tronbid", price="6")).tick()
     assert not provider.posts
     await assert_money(db_factory, "10", "0", releases=1)
 
@@ -249,7 +252,7 @@ async def test_quote_failure_retries_before_release(db_factory):
     order_id = await reserve(db_factory)
     provider = FakeProvider()
     provider.quote_error = True
-    service = worker(db_factory, provider, retries=2)
+    service = worker(db_factory, provider, FakeProvider("tronbid", price="6"), retries=2)
     await service.tick()
     await assert_money(db_factory, "6", "4")
     await due(db_factory, order_id)
@@ -342,8 +345,10 @@ async def test_cancel_during_quote_prevents_post(db_factory):
     order_id = await reserve(db_factory)
     provider = FakeProvider()
     provider.quote_started, provider.quote_continue = asyncio.Event(), asyncio.Event()
-    task = asyncio.create_task(worker(db_factory, provider).tick())
-    await provider.quote_started.wait()
+    task = asyncio.create_task(
+        worker(db_factory, provider, FakeProvider("tronbid", price="3")).tick()
+    )
+    await asyncio.wait_for(provider.quote_started.wait(), 5)
     async with db_factory() as session, session.begin():
         await rental.cancel_order(session, user_id=1, order_id=order_id)
     provider.quote_continue.set()
@@ -434,7 +439,13 @@ async def test_wallet_database_nonnegative_constraint(db_factory):
 @pytest.mark.parametrize("provider_name", ["tronow", "tronbid"])
 @pytest.mark.parametrize("lost_response", [False, True])
 async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_name, lost_response):
-    remote = {"bodies": [], "charges": {}, "fulfilled": False, "lost": lost_response}
+    remote = {
+        "bodies": [],
+        "charges": {},
+        "fulfilled": False,
+        "lost": lost_response,
+        "read_calls": 0,
+    }
 
     def response(data, status=200):
         envelope = {"code": "OK", "data": data} if provider_name == "tronow" else data
@@ -470,6 +481,7 @@ async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_nam
     async def endpoint(request):
         path = request.path
         if path.endswith("balance"):
+            remote["read_calls"] += 1
             return response(
                 {
                     "currency": "TRX",
@@ -481,6 +493,7 @@ async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_nam
                 }
             )
         if path.endswith("quote"):
+            remote["read_calls"] += 1
             return response(
                 {
                     "resource_amount": 65000,
@@ -544,6 +557,7 @@ async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_nam
             await due(db_factory, order_id)
             await worker(db_factory, provider).tick()
             await assert_money(db_factory, "6", "0", captures=1)
+            assert remote["read_calls"] == 0
             assert len(remote["charges"]) == 1
             assert len(set(remote["bodies"])) == 1
             expected_posts = 2 if provider_name == "tronbid" and lost_response else 1
@@ -551,6 +565,7 @@ async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_nam
             async with db_factory() as session:
                 attempt = await session.scalar(select(PurchaseAttempt))
                 assert attempt.request_body.encode() == remote["bodies"][0]
+                assert attempt.quoted_cost is None
                 order = await session.get(Order, order_id)
                 assert order.status is OrderStatus.ACTIVE
                 if provider_name == "tronbid":
@@ -612,7 +627,7 @@ async def test_quote_rate_limit_respects_retry_after(db_factory):
     provider = FakeProvider()
     provider.quote = AsyncMock(side_effect=TronowApiError("RATE_LIMITED", 429, retry_after=120))
     before = datetime.now(TIMEZONE)
-    await worker(db_factory, provider, retries=3).tick()
+    await worker(db_factory, provider, FakeProvider("tronbid", price="6"), retries=3).tick()
     async with db_factory() as session:
         order = await session.get(Order, order_id)
         assert order.next_run_at >= before + timedelta(seconds=120)

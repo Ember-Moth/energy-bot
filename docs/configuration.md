@@ -77,12 +77,12 @@ Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求
 | `products[].energy_amount` | 必填 | 正整数能量数量 |
 | `products[].duration_minutes` | 必填 | 1–525600 分钟 |
 | `products[].price_trx` | 必填 | 正数销售价,最多 6 位小数,小于 1,000,000 TRX |
-| `products[].max_cost_trx` | 销售价 | 询价成本上限,不是上游成交价保证 |
+| `products[].max_cost_trx` | 销售价 | 多上游询价成本上限;单上游仅用于成交后告警,不是成交价保证 |
 | `rental.poll_seconds` | `5` | 未完成订单的再次查单间隔,1–300 秒 |
 | `rental.lease_seconds` | `180` | 工作租约,180–3600 秒,覆盖最大请求超时 |
 | `rental.batch_size` | `20` | 单轮维护/tick 的数量上限,1–100;生产消费者持续工作 |
 | `rental.max_submit_attempts` | `5` | 无上游单号时的提交/恢复预算,1–100;耗尽转核对,不解冻或换单 |
-| `rental.quote_retry_limit` | `3` | 无可采购报价的尝试次数,1–100;耗尽解冻 |
+| `rental.quote_retry_limit` | `3` | 多上游无可采购报价的尝试次数,1–100;耗尽解冻 |
 | `rental.order_concurrency` | `8` | 每进程采购消费者数,1–64 |
 | `rental.notification_concurrency` | `4` | 每进程通知消费者数,1–32,独立于采购 |
 | `rental.idle_poll_seconds` | `1` | 队列为空时等待,0.05–30 秒 |
@@ -96,6 +96,9 @@ Telegram 每次请求 webhook 都会在 `X-Telegram-Bot-Api-Secret-Token` 请求
 TRONow 需要 api_key 和 api_secret 才进入比价池;TronBid 需要 api_key。
 两者均使用经营者的上游预存余额。用户充值渠道不在此配置中。
 完整流程、异常恢复和资金语义见 [订单系统](orders.md)。
+仅配置一家凭据齐全的供应商时自动直采,不调用报价或上游余额接口;
+配置两家时继续比价。判断以配置数量为准,不是某次报价成功的数量。
+
 
 
 ### TRONow 商户限流

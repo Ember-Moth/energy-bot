@@ -26,8 +26,20 @@ SKIP LOCKED 是领取行时的锁策略,不是一种表类型;
 [PostgreSQL 文档](https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE)
 明确说明它适用于多个消费者访问队列的场景。
 
-## 本地对照结果
+## 单上游直采说明
 
+只配置一家供应商时,采购不调用报价/上游余额接口,报价缓存开关不会改变这一流程。
+`benchmark_orders.py` 支持 `--mode single`（默认）和 `--mode multi`。
+单上游基准会断言报价与余额请求均为 0;多上游基准使用模拟 TRONow 与 TronBid,
+选择报价更低的 TronBid,用于继续验证比价与读缓存。
+本轮分别以两种模式运行每组 20 单的模拟上游验证:所有组均完成 20 次采购和 20 次扣款;
+单上游各组报价/余额请求均为 0,多上游保留这些请求并选中低价方。
+单上游报价缓存不参与流程,组间耗时波动不能归因于报价缓存。
+
+## 历史本地对照结果
+
+以下数据记录于实现单上游直采之前,当时单个供应商仍会询价。
+它不能作为当前单上游性能数据,也不能与当前两供应商基准直接等同比较。
 2026-09-20,本机 Python 3.14 + uvloop、独立 PostgreSQL 17、回环 HTTP 模拟 TronBid。
 每组预先入队 80 单,每个模拟 HTTP 请求等待 100ms;均验证 80 单采购和 80 次用户扣款,
 无重复扣款。耗时从开始消费计到全部结算提交,不包含建库、迁移和入队准备时间。
@@ -61,7 +73,8 @@ UNLOGGED 缓存确实清空,81 条订单、242 条资金流水、81 条采购尝
 设置 `ENERGY_BOT_BENCHMARK_DSN` 指向该库,然后执行:
 
 ```bash
-uv run python scripts/benchmark_orders.py --orders 80 --delay-ms 100 --concurrency 8
+uv run python scripts/benchmark_orders.py --mode single --orders 80 --delay-ms 100 --concurrency 8
+uv run python scripts/benchmark_orders.py --mode multi --orders 80 --delay-ms 100 --concurrency 8
 ```
 
 脚本仅允许回环地址,自动执行 Alembic 迁移,运行三组对照,输出 JSON 指标。

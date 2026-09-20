@@ -108,12 +108,13 @@ async def test_notification_not_blocked_by_slow_order(db_factory):
 
     service = OrderWorker(
         db_factory,
-        {provider.name: provider},
+        {provider.name: provider, "tronbid": FakeProvider("tronbid", price="3")},
         RentalSettings(order_concurrency=2, idle_poll_seconds=0.05),
         send,
     )
     service.start()
     try:
+        await asyncio.wait_for(provider.quote_started.wait(), 5)
         await asyncio.wait_for(delivered.wait(), 5)
         assert not provider.quote_continue.is_set()
     finally:

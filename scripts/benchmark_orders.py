@@ -8,11 +8,13 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -22,7 +24,13 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from sqlalchemy import delete, func, make_url, select
 
-from energy_bot.config import RentalSettings, TronbidSettings, UpstreamSettings
+from energy_bot.config import (
+    TIMEZONE,
+    RentalSettings,
+    TronbidSettings,
+    TronowSettings,
+    UpstreamSettings,
+)
 from energy_bot.db import create_engine_from_dsn, create_session_factory
 from energy_bot.models import Base, Order, WalletEntry
 from energy_bot.repositories.users import upsert_user
@@ -48,7 +56,9 @@ class MeasuredWorker(OrderWorker):
         self.latencies.append(time.perf_counter() - self.started)
 
 
-async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> list[dict]:
+async def benchmark(
+    dsn: str, count: int, delay_ms: float, concurrency: int, mode: str
+) -> list[dict]:
     engine = create_engine_from_dsn(dsn)
     factory = create_session_factory(engine)
     counters = {"quote": 0, "balance": 0, "orders": 0}
@@ -58,6 +68,26 @@ async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> 
         route = request.path.rsplit("/", 1)[-1]
         counters[route] += 1
         await asyncio.sleep(delay_ms / 1000)
+        if request.path.startswith("/openapi/v1/"):
+            if route == "quote":
+                data = {
+                    "resource_amount": 65000,
+                    "duration": "1h",
+                    "price_sun": "3000000",
+                    "currency": "TRX",
+                    "priced_at": datetime.now(TIMEZONE).isoformat(),
+                }
+            elif route == "balance":
+                data = {
+                    "currency": "TRX",
+                    "available_balance_sun": "1000000000000",
+                    "reserved_balance_sun": "0",
+                    "total_balance_sun": "1000000000000",
+                    "updated_at": datetime.now(TIMEZONE).isoformat(),
+                }
+            else:
+                raise AssertionError("基准应选择报价更低的 TronBid")
+            return web.json_response({"code": "OK", "data": data})
         if route == "quote":
             return web.json_response(
                 {"price_trx": "2.000000", "available": True, "expires_in_sec": 30}
@@ -81,6 +111,7 @@ async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> 
 
     app = web.Application()
     app.router.add_route("*", "/api/v2/quick-rent/{route}", upstream)
+    app.router.add_route("*", "/openapi/v1/{tail:.*}", upstream)
     results = []
     try:
         async with TestServer(app) as server:
@@ -117,10 +148,17 @@ async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> 
                 )
                 providers = build_providers(
                     UpstreamSettings(
+                        tronow=TronowSettings(
+                            base_url=str(server.make_url("/openapi/v1")),
+                            api_key="synthetic-second" if mode == "multi" else "",
+                            api_secret=secrets.token_hex(16),
+                            request_limit=1000,
+                            order_limit=1000,
+                        ),
                         tronbid=TronbidSettings(
                             base_url=str(server.make_url("/api/v2/quick-rent")),
                             api_key="synthetic-benchmark",
-                        )
+                        ),
                     ),
                     factory,
                     settings,
@@ -143,9 +181,14 @@ async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> 
                         )
                     assert captured == entries == len(charged) == count, "订单或资金验证失败"
                     assert len(worker.latencies) == count
+                    if mode == "single":
+                        assert counters["quote"] == counters["balance"] == 0
+                    else:
+                        assert counters["quote"] > 0 and counters["balance"] > 0
                     ordered = sorted(worker.latencies)
                     results.append(
                         {
+                            "mode": mode,
                             "orders": count,
                             "concurrency": workers,
                             "cache_seconds": cache_seconds,
@@ -170,6 +213,7 @@ async def benchmark(dsn: str, count: int, delay_ms: float, concurrency: int) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("single", "multi"), default="single")
     parser.add_argument("--orders", type=int, default=80)
     parser.add_argument("--delay-ms", type=float, default=100)
     parser.add_argument("--concurrency", type=int, default=8)
@@ -194,7 +238,9 @@ def main() -> None:
             check=True,
         )
     with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
-        results = runner.run(benchmark(dsn, args.orders, args.delay_ms, args.concurrency))
+        results = runner.run(
+            benchmark(dsn, args.orders, args.delay_ms, args.concurrency, args.mode)
+        )
     if args.output:
         args.output.write_text(
             json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

@@ -25,7 +25,7 @@ database:                    # PostgreSQL(SQLAlchemy async + asyncpg)
   # DSN 只允许环境变量:ENERGY_BOT_DATABASE__DSN(设置后优先生效);
   # 配置文件里禁止出现 dsn 字段,请使用上面的离散字段
 
-upstream:                     # 上游能量供应商
+upstream:                     # 仅配置一家时直采,配置两家时比价
   tronow:                     # TRONow 商户 OpenAPI(签名细节见 docs/upstream/tronow.md)
     base_url: "https://api.tronow.io/openapi/v1"
     api_key: ""               # 商户 API Key;建议环境变量注入:ENERGY_BOT_UPSTREAM__TRONOW__API_KEY
@@ -53,12 +53,12 @@ rental:
   #   - energy_amount: 65000
   #     duration_minutes: 60
   #     price_trx: "5.000000" # 示例销售价,不是实际推荐定价
-  #     max_cost_trx: "4.000000" # 可选询价预算,默认销售价;上游下单才锁价
+  #     max_cost_trx: "4.000000" # 多上游询价预算;单上游仅成交后告警,默认销售价
   poll_seconds: 5
   lease_seconds: 180          # 任务租约,须覆盖询价和提交的超时窗口
   batch_size: 20             # 单轮维护/tick 的处理上限;生产消费者持续领取
   max_submit_attempts: 5     # 不确定提交的自动恢复预算,耗尽保留冻结款并核对原单
-  quote_retry_limit: 3        # 无可采购报价时重试次数,耗尽释放用户冻结款
+  quote_retry_limit: 3        # 多上游无可采购报价时重试次数,耗尽释放用户冻结款
   order_concurrency: 8       # 每进程采购消费者数
   notification_concurrency: 4 # 独立通知消费者数
   idle_poll_seconds: 1        # 队列为空时的等待;有任务时连续消费

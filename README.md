@@ -17,7 +17,7 @@ uv run python -m energy_bot --config config.yaml  # 等价的模块方式
 
 ## 余额订单
 
-已提供用户账本、按套餐冻结余额、上游比价采购、原单恢复、回调/轮询对账和订单通知。
+已提供用户账本、按套餐冻结余额、单上游直采/多上游比价采购、原单恢复、回调/轮询对账和订单通知。
 使用 `/rent`、`/balance`、`/orders`、`/order`、`/cancel_order`,默认不启用真实采购。
 先配置套餐和上游余额,再启用 `rental.enabled`;充值渠道仍由独立入账接口衔接。
 详见 [订单系统](docs/orders.md)。

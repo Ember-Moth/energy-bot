@@ -321,7 +321,23 @@ class OrderWorker:
         first_submission = attempt is None
         if attempt is None:
             excluded = {a.provider for a in attempts if a.state in ("failed", "rejected")}
-            offer, quote_delay = await self._offer(product, excluded, budget)
+            # 只按已装配的供应商数量判断模式,不因某次询价失败而退化成直采。
+            single_provider = len(self.providers) == 1
+            offer = None
+            quote_delay = 0.0
+            selected = None
+            single_failure = "UPSTREAM_EXHAUSTED"
+            if single_provider:
+                name, adapter = next(iter(self.providers.items()))
+                if name not in excluded:
+                    if adapter.supports(product):
+                        selected = name
+                    else:
+                        single_failure = "UNSUPPORTED_PRODUCT"
+            else:
+                offer, quote_delay = await self._offer(product, excluded, budget)
+                if offer is not None:
+                    selected = offer.provider
             async with self.factory() as session, session.begin():
                 order = await self._locked(session, order_id, token)
                 if order is None:
@@ -329,7 +345,12 @@ class OrderWorker:
                 if order.wallet_state != "held":
                     self._finish(order, None)
                     return
-                if offer is None or offer.valid_until <= _now():
+                if selected is None or (offer is not None and offer.valid_until <= _now()):
+                    if single_provider:
+                        # 本地规格不支持或唯一供应商已明确失败,无需继续询价重试。
+                        await rental.release_order(session, order, reason=single_failure)
+                        self._finish(order, None)
+                        return
                     order.retry_count += 1
                     order.last_error = "NO_AFFORDABLE_OFFER"
                     if order.retry_count >= self.settings.quote_retry_limit:
@@ -346,16 +367,16 @@ class OrderWorker:
                 attempt = PurchaseAttempt(
                     order_id=order_id,
                     sequence=len(attempts) + 1,
-                    provider=offer.provider,
+                    provider=selected,
                     business_id=business_id,
                     idempotency_key=business_id,
-                    request_body=self.providers[offer.provider].body(product, business_id),
-                    quoted_cost=offer.cost,
+                    request_body=self.providers[selected].body(product, business_id),
+                    quoted_cost=offer.cost if offer is not None else None,
                     state="submitting",
                     submit_attempts=1,
                 )
                 session.add(attempt)
-                await rental.begin_purchase(session, order, offer.provider)
+                await rental.begin_purchase(session, order, selected)
                 # flush + 事务提交完成后才允许 POST;崩溃后读取同一条请求恢复。
                 await session.flush()
 
