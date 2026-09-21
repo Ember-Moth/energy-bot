@@ -16,11 +16,9 @@ from energy_bot.services.wallet import WalletError
 router = Router(name="rental")
 _STATUS_TEXT = {
     "draft": "待处理",
-    "paid": "待采购",
     "reserved": "余额已冻结，等待采购",
     "delegating": "采购确认中",
     "active": "已到账",
-    "failed": "采购失败",
     "refunded": "已退回余额",
 }
 
@@ -30,7 +28,7 @@ def _private(message: Message) -> bool:
 
 
 def _summary(order: Order) -> str:
-    minutes = order.duration_minutes or (order.duration_hours or 0) * 60
+    minutes = order.duration_minutes
     return (
         f"#{order.id} · {_STATUS_TEXT[order.status.value]}\n"
         f"能量 {order.energy_amount} / {minutes} 分钟 / {order.price:f} TRX"

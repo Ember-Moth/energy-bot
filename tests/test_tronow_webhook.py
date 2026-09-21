@@ -1,4 +1,4 @@
-"""TRONow webhook 验收:验签固定向量 + 端到端流转(需真实 PG 时走集成段)。"""
+"""TRONow webhook 验收:验签固定向量 + 端到端唤醒(需真实 PG 时走集成段)。"""
 
 import asyncio
 import hashlib
@@ -15,8 +15,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from sqlalchemy import func, select
 
 from energy_bot.config import TIMEZONE, TronowSettings
-from energy_bot.models import Order, OrderStatus, UpstreamDelivery, User
-from energy_bot.services import rental
+from energy_bot.models import Order, OrderStatus, PurchaseAttempt, UpstreamDelivery, User
 from energy_bot.web.tronow import TronowWebhookView, verify_signature
 
 WEBHOOK_SECRET = "whsec-test"
@@ -149,13 +148,13 @@ def test_verify_signature_rejects_missing_parts() -> None:
         assert not verify_signature(WEBHOOK_SECRET, body=body, **base), f"缺字段 {kwargs} 未被拒绝"
 
 
-# --- 端到端(真实 PG:去重 + 状态流转;无 DSN 时跳过) ---
+# --- 端到端(真实 PG:去重 + 唤醒查单;无 DSN 时跳过) ---
 
 
 @pytest.fixture
 async def webhook_client(db_factory):
     factory = db_factory
-    # 预置用户 + 一条 delegating 订单
+    # 预置用户 + 一条余额采购中的订单及采购尝试
     async with factory() as session:
         session.add(User(id=1, first_name="回调测试用户"))
         session.add(
@@ -163,10 +162,28 @@ async def webhook_client(db_factory):
                 user_id=1,
                 recipient_address=ADDRESS,
                 energy_amount=65000,
-                duration_hours=1,
+                duration_minutes=60,
                 price=1,
                 status=OrderStatus.DELEGATING,
                 provider="tronow",
+                upstream_order_id="ord_x1",
+                request_key="eb-test-1",
+                wallet_state="held",
+                next_run_at=datetime.now(TIMEZONE) + timedelta(hours=1),
+            )
+        )
+        await session.flush()
+        order = (await session.scalars(select(Order))).one()
+        session.add(
+            PurchaseAttempt(
+                order_id=order.id,
+                sequence=1,
+                provider="tronow",
+                business_id="eb-000001",
+                idempotency_key="eb-000001",
+                request_body="{}",
+                state="pending",
+                submit_attempts=1,
                 upstream_order_id="ord_x1",
             )
         )
@@ -177,6 +194,10 @@ async def webhook_client(db_factory):
     await client.start_server()
     yield client, factory
     await client.close()
+
+
+async def _load_order(session) -> Order:
+    return (await session.scalars(select(Order))).one()
 
 
 def _post(
@@ -197,7 +218,7 @@ def _post(
     )
 
 
-async def test_webhook_activates_order_and_dedups(webhook_client) -> None:
+async def test_webhook_wakes_order_and_dedups(webhook_client) -> None:
     http, factory = webhook_client
     body = _callback_body()
 
@@ -206,9 +227,10 @@ async def test_webhook_activates_order_and_dedups(webhook_client) -> None:
     assert (await resp.json())["status"] == "applied"
 
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
-        assert order.upstream_txid == "tx-hash-1"
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING  # 回调不直接流转订单
+        # 已唤醒,等待后台完整查单
+        assert order.next_run_at is not None and order.next_run_at <= datetime.now(TIMEZONE)
         deliveries = len((await session.execute(select(UpstreamDelivery))).scalars().all())
     assert deliveries == 1
 
@@ -221,16 +243,17 @@ async def test_webhook_activates_order_and_dedups(webhook_client) -> None:
 async def test_webhook_duplicate_event_is_idempotent(webhook_client) -> None:
     http, factory = webhook_client
     await _post(http, _callback_body(), delivery="dlv-1")
-    # 新 delivery、相同业务事件:不应报错,状态保持 active
+    # 新 delivery、相同业务事件:仍确认投递,状态不变
     resp = await _post(http, _callback_body(), delivery="dlv-2")
     assert resp.status == 200
     assert (await resp.json())["status"] == "applied"
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
 
 
-async def test_webhook_failed_event_transitions(webhook_client) -> None:
+async def test_webhook_failed_event_also_wakes(webhook_client) -> None:
+    """成功与失败回调都只触发查单;结算语义由完整订单查询裁决。"""
     http, factory = webhook_client
     resp = await _post(
         http,
@@ -240,8 +263,9 @@ async def test_webhook_failed_event_transitions(webhook_client) -> None:
     )
     assert resp.status == 200
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.FAILED
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
+        assert order.next_run_at is not None and order.next_run_at <= datetime.now(TIMEZONE)
 
 
 async def test_webhook_rejects_bad_signature(webhook_client) -> None:
@@ -260,8 +284,9 @@ async def test_webhook_rejects_bad_signature(webhook_client) -> None:
     )
     assert resp.status == 401
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING  # 未被篡改请求改动
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING  # 未被篡改请求改动
+        assert order.next_run_at is not None and order.next_run_at > datetime.now(TIMEZONE)
 
 
 async def test_webhook_rejects_stale_timestamp(webhook_client) -> None:
@@ -289,13 +314,17 @@ async def test_webhook_rejects_nonterminal_status(webhook_client) -> None:
     assert resp.status == 422
     assert (await resp.json())["status"] == "invalid"
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
 
 
 async def test_webhook_unmatched_order_gets_503_for_redelivery(webhook_client) -> None:
     http, factory = webhook_client
-    resp = await _post(http, _callback_body(order_id="ord_unknown"), delivery="dlv-u1")
+    resp = await _post(
+        http,
+        _callback_body(order_id="ord_unknown", client_order_id="eb-unknown"),
+        delivery="dlv-u1",
+    )
     # 非 2xx 上游才会重投;且不落去重记录,重投时本地落库后即可匹配
     assert resp.status == 503
     assert (await resp.json())["status"] == "unmatched"
@@ -321,8 +350,8 @@ async def test_webhook_concurrent_duplicate_answers_duplicate(
     assert resp.status == 200
     assert (await resp.json())["status"] == "duplicate"
     async with factory() as session:  # 冲突回滚:业务状态与去重记录都保持不变
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
         count = (
             await session.execute(select(func.count()).select_from(UpstreamDelivery))
         ).scalar_one()
@@ -330,14 +359,15 @@ async def test_webhook_concurrent_duplicate_answers_duplicate(
 
 
 async def test_webhook_nonstring_txid_ignored(webhook_client) -> None:
+    """回调不写入任何订单字段:非法 txid 不阻断唤醒,结算以完整查单为准。"""
     http, factory = webhook_client
     resp = await _post(http, _callback_body(txid=12345), delivery="dlv-tx")  # 防御:非法类型
     assert resp.status == 200
     assert (await resp.json())["status"] == "applied"
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
-        assert order.upstream_txid is None  # 非字符串 txid 不入库,但不阻断流转
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
+        assert order.upstream_txid is None
 
 
 async def test_webhook_rejects_oversized_body() -> None:
@@ -383,8 +413,8 @@ async def test_invalid_callback_is_not_consumed(webhook_client, kind: str) -> No
     assert response.status == 422
     async with factory() as session:
         assert await session.get(UpstreamDelivery, "invalid-dlv") is None
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
     # 修正后的同一 delivery 可以重新处理,没有被错误去重。
     response = await _post(http, _callback_body(), "invalid-dlv")
     assert response.status == 200
@@ -414,21 +444,22 @@ async def test_signed_non_utf8_callback_is_bad_request() -> None:
         assert response.status == 400
 
 
-async def test_callback_without_lease_field_activates(webhook_client) -> None:
-    """业务不管理上游租期:回调缺少租期字段也能直接激活,不再需要查单补租期。"""
+async def test_callback_without_lease_field_wakes(webhook_client) -> None:
+    """业务不管理上游租期:回调缺少租期字段也能照常唤醒查单。"""
     http, factory = webhook_client
     payload = json.loads(_callback_body())
     del payload["data"]["lease_expires_at"]
     response = await _post(http, json.dumps(payload).encode(), "no-lease")
     assert response.status == 200
     async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
+        assert order.next_run_at is not None and order.next_run_at <= datetime.now(TIMEZONE)
 
 
 @pytest.mark.parametrize("expiry", [123, "bad-time", "2026-09-20T12:00:00"])
 async def test_lease_field_is_ignored(webhook_client, expiry: Any) -> None:
-    """回调里的租期字段无论格式都被忽略,照常激活并确认投递。"""
+    """回调里的租期字段无论格式都被忽略,照常确认投递并唤醒。"""
     http, factory = webhook_client
     payload = json.loads(_callback_body())
     payload["data"]["lease_expires_at"] = expiry
@@ -436,8 +467,8 @@ async def test_lease_field_is_ignored(webhook_client, expiry: Any) -> None:
     assert response.status == 200
     async with factory() as session:
         assert await session.get(UpstreamDelivery, "ignored-lease") is not None
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
+        order = await _load_order(session)
+        assert order.next_run_at is not None and order.next_run_at <= datetime.now(TIMEZONE)
 
 
 async def test_concurrent_callbacks_apply_once(webhook_client) -> None:
@@ -448,8 +479,8 @@ async def test_concurrent_callbacks_apply_once(webhook_client) -> None:
     async with factory() as session:
         count = await session.scalar(select(func.count()).select_from(UpstreamDelivery))
         assert count == 1
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.ACTIVE
+        order = await _load_order(session)
+        assert order.status is OrderStatus.DELEGATING
 
 
 async def test_chunked_body_size_limit() -> None:

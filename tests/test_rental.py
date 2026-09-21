@@ -1,16 +1,18 @@
-"""租赁状态机单元测试(无数据库)+ 完整生命周期集成测试(需真实 PG)。"""
+"""租赁状态机单元测试(无数据库)+ 余额订单服务级集成测试(需真实 PG)。"""
 
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from energy_bot.models import Order, OrderStatus
 from energy_bot.repositories import orders as orders_repo
 from energy_bot.repositories import users as users_repo
-from energy_bot.services import rental
+from energy_bot.services import rental, wallet
+from energy_bot.services.wallet import WalletError
 
 # 知名黑洞地址(0x41 + 20 个零字节),base58check 校验和有效
 VALID_ADDRESS = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb"
@@ -23,7 +25,7 @@ def _order(status: OrderStatus) -> Order:
         user_id=1,
         recipient_address=VALID_ADDRESS,
         energy_amount=1000,
-        duration_hours=1,
+        duration_minutes=60,
         price=Decimal("1"),
         status=status,
     )
@@ -49,11 +51,6 @@ def test_terminal_states_have_no_exits() -> None:
         assert rental.ALLOWED_TRANSITIONS[terminal] == frozenset()
 
 
-def test_failed_order_can_be_refunded() -> None:
-    # 上游执行失败后的售后路径:failed → refunded
-    rental.ensure_transition(_order(OrderStatus.FAILED), OrderStatus.REFUNDED)
-
-
 def test_tron_address_format() -> None:
     assert rental.TRON_ADDRESS_RE.fullmatch(VALID_ADDRESS)
     assert not rental.TRON_ADDRESS_RE.fullmatch("0x1234567890")
@@ -77,154 +74,158 @@ def test_tron_address_checksum() -> None:
     not os.environ.get("ENERGY_BOT_TEST_DSN"),
     reason="需要 ENERGY_BOT_TEST_DSN 指向可用的 PostgreSQL(测试库,数据会被清空)",
 )
-async def test_rental_lifecycle(db_factory) -> None:
+async def test_wallet_order_lifecycle(db_factory) -> None:
     factory = db_factory
 
-    # 下单:地址/参数校验 + draft 落库
+    # 下单:地址校验先于写库,reserved 落库并冻结销售金额
     async with factory() as session:
         user = await users_repo.upsert_user(
             session, user_id=42, first_name="租赁客", language_code="zh"
         )
+        await wallet.credit(session, user_id=user.id, amount=Decimal("10"), reference="seed-42")
         with pytest.raises(rental.RentalError, match="TRON"):
-            await rental.place_order(
+            await rental.reserve_order(
                 session,
                 user_id=user.id,
+                request_key="tg:bad",
                 recipient_address="0xabc",
-                energy_amount=1000,
-                duration_hours=1,
+                energy_amount=65000,
+                duration_minutes=60,
                 price=Decimal("1"),
             )
-        order = await rental.place_order(
+        order = await rental.reserve_order(
             session,
             user_id=user.id,
+            request_key="tg:1:1",
             recipient_address=VALID_ADDRESS,
             energy_amount=131072,
-            duration_hours=2,
+            duration_minutes=120,
             price=Decimal("5.5"),
         )
-        assert order.status is OrderStatus.DRAFT
+        assert order.status is OrderStatus.RESERVED and order.wallet_state == "held"
+        assert order.duration_minutes == 120
         order_id = order.id
         await session.commit()
 
-    # 收款 → 委托上游 → 能量到账
+    # 相同请求号幂等重放;同号不同参数拒绝
     async with factory() as session:
-        order = await rental.mark_paid(session, order_id)
-        assert order.status is OrderStatus.PAID
-
-        order = await rental.start_delegation(
-            session, order_id, provider="upstream-a", upstream_order_id="UP-1"
-        )
-        assert order.status is OrderStatus.DELEGATING
-        assert order.delegated_at is not None
-
-        order = await rental.activate(session, order_id, upstream_txid="tx-123")
-        assert order.status is OrderStatus.ACTIVE
-        assert order.upstream_txid == "tx-123"
-        assert order.delegated_at is not None
-        await session.commit()
-
-    # ACTIVE 是终态:不能直接退款
-    async with factory() as session:
-        with pytest.raises(rental.InvalidTransitionError):
-            await rental.refund(session, order_id)
-        await session.commit()
-
-    # 第二单走售后路径:委托上游 → 执行失败 → 退款
-    async with factory() as session:
-        failed_order = await rental.place_order(
+        replay = await rental.reserve_order(
             session,
-            user_id=user.id,
+            user_id=42,
+            request_key="tg:1:1",
+            recipient_address=VALID_ADDRESS,
+            energy_amount=131072,
+            duration_minutes=120,
+            price=Decimal("5.5"),
+        )
+        assert replay.id == order_id
+        with pytest.raises(rental.RentalError, match="请求标识"):
+            await rental.reserve_order(
+                session,
+                user_id=42,
+                request_key="tg:1:1",
+                recipient_address=VALID_ADDRESS_2,
+                energy_amount=131072,
+                duration_minutes=120,
+                price=Decimal("5.5"),
+            )
+        await session.commit()
+
+    # 采购提交 → 能量到账:冻结款转为实扣,ACTIVE 不管理上游租期
+    async with factory() as session:
+        order = await orders_repo.get_order_for_update(session, order_id)
+        assert order is not None
+        await rental.begin_purchase(session, order, "tronow")
+        assert order.status is OrderStatus.DELEGATING
+        await rental.complete_purchase(session, order, cost=Decimal("4.0"), txid="tx-123")
+        assert order.status is OrderStatus.ACTIVE and order.wallet_state == "captured"
+        assert order.upstream_txid == "tx-123"
+        account = await wallet.lock_wallet(session, 42)
+        assert account.available == Decimal("4.5") and account.frozen == 0
+        await session.commit()
+
+    # ACTIVE 是终态:不能取消
+    async with factory() as session:
+        with pytest.raises(rental.RentalError, match="采购"):
+            await rental.cancel_order(session, user_id=42, order_id=order_id)
+        await session.commit()
+
+    # 第二单:取消即解冻退款
+    async with factory() as session:
+        order2 = await rental.reserve_order(
+            session,
+            user_id=42,
+            request_key="tg:1:2",
             recipient_address=VALID_ADDRESS_2,
             energy_amount=65000,
-            duration_hours=1,
+            duration_minutes=60,
             price=Decimal("2.5"),
         )
-        failed_id = failed_order.id
         await session.commit()
     async with factory() as session:
-        await rental.mark_paid(session, failed_id)
-        await rental.start_delegation(
-            session, failed_id, provider="upstream-a", upstream_order_id="UP-2"
-        )
-        order = await rental.fail(session, failed_id)
-        assert order.status is OrderStatus.FAILED
-        order = await rental.refund(session, failed_id)  # failed → refunded 售后通道
-        assert order.status is OrderStatus.REFUNDED
+        order2 = await rental.cancel_order(session, user_id=42, order_id=order2.id)
+        assert order2.status is OrderStatus.REFUNDED and order2.wallet_state == "released"
+        account = await wallet.lock_wallet(session, 42)
+        assert account.available == Decimal("4.5") and account.frozen == 0
         await session.commit()
 
-    # 对账与按用户查询
+    # 按用户查询
     async with factory() as session:
-        by_upstream = await orders_repo.get_by_upstream_order_id(
-            session, "UP-1", provider="upstream-a"
-        )
-        assert by_upstream is not None and by_upstream.id == order_id
         mine = await orders_repo.list_by_user(session, 42)
-        assert [o.id for o in mine] == [failed_id, order_id]  # 按创建时间倒序
-
-
-async def test_activation_needs_no_lease_expiry(db_factory) -> None:
-    """业务不管理上游租期:激活不需要任何到期时间,ACTIVE 即为终态。"""
-    async with db_factory() as session:
-        await users_repo.upsert_user(session, user_id=1, first_name="激活测试", language_code="zh")
-        order = await rental.place_order(
-            session,
-            user_id=1,
-            recipient_address=VALID_ADDRESS,
-            energy_amount=65000,
-            duration_hours=1,
-            price=Decimal("1"),
-        )
-        await rental.mark_paid(session, order.id)
-        await rental.start_delegation(
-            session, order.id, provider="tronow", upstream_order_id="ord_time"
-        )
-        await rental.activate(session, order.id)
-        await session.commit()
-        assert order.status is OrderStatus.ACTIVE
+        assert [o.id for o in mine] == [order2.id, order_id]  # 按创建时间倒序
 
 
 async def test_upstream_identity_is_scoped_and_unique(db_factory) -> None:
+    """(provider, upstream_order_id) 唯一约束:跨供应商可同号,同供应商冲突。"""
     async with db_factory() as session:
         await users_repo.upsert_user(
             session, user_id=1, first_name="唯一性测试", language_code="zh"
         )
-        identifiers = []
-        for provider in ("tronow", "tronbid", "tronow"):
-            order = await rental.place_order(
-                session,
+        for provider in ("tronow", "tronbid"):
+            session.add(
+                Order(
+                    user_id=1,
+                    recipient_address=VALID_ADDRESS,
+                    energy_amount=65000,
+                    duration_minutes=60,
+                    price=Decimal("1"),
+                    status=OrderStatus.DELEGATING,
+                    provider=provider,
+                    upstream_order_id="same-id",
+                )
+            )
+        await session.flush()
+        await session.commit()
+        session.add(
+            Order(
                 user_id=1,
                 recipient_address=VALID_ADDRESS,
                 energy_amount=65000,
-                duration_hours=1,
+                duration_minutes=60,
                 price=Decimal("1"),
+                status=OrderStatus.DELEGATING,
+                provider="tronow",
+                upstream_order_id="same-id",
             )
-            await rental.mark_paid(session, order.id)
-            identifiers.append(order.id)
-            if len(identifiers) < 3:
-                await rental.start_delegation(
-                    session, order.id, provider=provider, upstream_order_id="same-id"
-                )
-        await session.commit()
-        for provider, order_id in zip(("tronow", "tronbid"), identifiers[:2], strict=True):
-            found = await rental.get_by_upstream(
-                session, provider=provider, upstream_order_id="same-id"
-            )
-            assert found is not None and found.id == order_id
+        )
         with pytest.raises(IntegrityError):
-            await rental.start_delegation(
-                session, identifiers[2], provider="tronow", upstream_order_id="same-id"
-            )
+            await session.flush()
         await session.rollback()
+        rows = (
+            await session.scalars(select(Order).where(Order.upstream_order_id == "same-id"))
+        ).all()
+        assert {row.provider for row in rows} == {"tronow", "tronbid"}
 
 
 @pytest.mark.parametrize("price", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")])
 async def test_nonfinite_price_rejected_before_database(price: Decimal) -> None:
-    with pytest.raises(rental.RentalError, match="price"):
-        await rental.place_order(
+    with pytest.raises(WalletError, match="金额"):
+        await rental.reserve_order(
             AsyncMock(),
             user_id=1,
+            request_key="tg:x",
             recipient_address=VALID_ADDRESS,
             energy_amount=65000,
-            duration_hours=1,
+            duration_minutes=60,
             price=price,
         )

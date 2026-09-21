@@ -23,15 +23,13 @@ BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 TRON_ADDRESS_PREFIX = 0x41  # 主网地址解码后的首字节
 
 # 允许的状态跃迁;ACTIVE / REFUNDED 为终态不再迁出。
+# 全部订单走余额冻结流程:draft 仅在建单瞬间存在,delegating 的结算只经
+# complete_purchase(到账扣款)/ release_order(失败解冻)。
 ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
-    OrderStatus.DRAFT: frozenset({OrderStatus.PAID, OrderStatus.RESERVED}),
+    OrderStatus.DRAFT: frozenset({OrderStatus.RESERVED}),
     OrderStatus.RESERVED: frozenset({OrderStatus.DELEGATING, OrderStatus.REFUNDED}),
-    OrderStatus.PAID: frozenset({OrderStatus.DELEGATING, OrderStatus.REFUNDED}),
-    OrderStatus.DELEGATING: frozenset(
-        {OrderStatus.ACTIVE, OrderStatus.FAILED, OrderStatus.REFUNDED}
-    ),
+    OrderStatus.DELEGATING: frozenset({OrderStatus.ACTIVE, OrderStatus.REFUNDED}),
     OrderStatus.ACTIVE: frozenset(),
-    OrderStatus.FAILED: frozenset({OrderStatus.REFUNDED}),  # 上游失败后可退款
     OrderStatus.REFUNDED: frozenset(),
 }
 
@@ -82,146 +80,11 @@ def ensure_transition(order: Order, to: OrderStatus) -> None:
         )
 
 
-async def place_order(
-    session: AsyncSession,
-    *,
-    user_id: int,
-    recipient_address: str,
-    energy_amount: int,
-    duration_hours: int,
-    price: Decimal,
-) -> Order:
-    """创建待支付订单(draft)。"""
-    if not is_valid_tron_address(recipient_address):
-        raise RentalError(f"无效的 TRON 地址:{recipient_address}")
-    if energy_amount <= 0:
-        raise RentalError("energy_amount 必须为正整数")
-    if duration_hours <= 0:
-        raise RentalError("duration_hours 必须为正整数")
-    if not price.is_finite() or price <= 0:
-        raise RentalError("price 必须为正数")
-    return await order_repo.create_order(
-        session,
-        user_id=user_id,
-        recipient_address=recipient_address,
-        energy_amount=energy_amount,
-        duration_hours=duration_hours,
-        price=price,
-    )
-
-
 async def _get_locked(session: AsyncSession, order_id: int) -> Order:
     order = await order_repo.get_order_for_update(session, order_id)
     if order is None:
         raise RentalError(f"订单不存在:{order_id}")
     return order
-
-
-async def mark_paid(session: AsyncSession, order_id: int) -> Order:
-    """收款确认:draft → paid。"""
-    order = await _get_locked(session, order_id)
-    if order.wallet_state is not None:
-        raise RentalError("余额订单必须通过采购结算流程流转")
-    ensure_transition(order, OrderStatus.PAID)
-    order.status = OrderStatus.PAID
-    await session.flush()
-    return order
-
-
-async def start_delegation(
-    session: AsyncSession,
-    order_id: int,
-    *,
-    provider: str,
-    upstream_order_id: str,
-) -> Order:
-    """已收款订单提交上游采购:paid → delegating,记录上游单号。"""
-    if not provider or not upstream_order_id:
-        raise RentalError("provider 与 upstream_order_id 均不能为空")
-    order = await _get_locked(session, order_id)
-    if order.wallet_state is not None:
-        raise RentalError("余额订单必须通过采购结算流程流转")
-    ensure_transition(order, OrderStatus.DELEGATING)
-    order.status = OrderStatus.DELEGATING
-    order.provider = provider
-    order.upstream_order_id = upstream_order_id
-    order.delegated_at = _now()
-    await session.flush()
-    return order
-
-
-async def activate(
-    session: AsyncSession,
-    order_id: int,
-    *,
-    upstream_txid: str = "",
-) -> Order:
-    """能量到账:delegating → active(成功终态,不管理上游租期)。"""
-    order = await _get_locked(session, order_id)
-    if order.wallet_state is not None:
-        raise RentalError("余额订单必须通过采购结算流程流转")
-    ensure_transition(order, OrderStatus.ACTIVE)
-    order.status = OrderStatus.ACTIVE
-    if upstream_txid:
-        order.upstream_txid = upstream_txid
-    await session.flush()
-    return order
-
-
-async def fail(session: AsyncSession, order_id: int) -> Order:
-    """上游执行失败:delegating → failed。"""
-    order = await _get_locked(session, order_id)
-    if order.wallet_state is not None:
-        raise RentalError("余额订单必须通过采购结算流程流转")
-    ensure_transition(order, OrderStatus.FAILED)
-    order.status = OrderStatus.FAILED
-    await session.flush()
-    return order
-
-
-async def refund(session: AsyncSession, order_id: int) -> Order:
-    """退款:paid / delegating / failed → refunded。"""
-    order = await _get_locked(session, order_id)
-    if order.wallet_state is not None:
-        raise RentalError("余额订单必须通过采购结算流程流转")
-    ensure_transition(order, OrderStatus.REFUNDED)
-    order.status = OrderStatus.REFUNDED
-    await session.flush()
-    return order
-
-
-# --- 上游事件编排(webhook / 轮询共用),按 provider + upstream_order_id 定位订单 ---
-
-
-async def get_by_upstream(
-    session: AsyncSession, *, provider: str, upstream_order_id: str
-) -> Order | None:
-    return await order_repo.get_by_upstream_order_id(
-        session, upstream_order_id, provider=provider, for_update=True
-    )
-
-
-async def handle_terminal_event(
-    session: AsyncSession,
-    order: Order,
-    *,
-    succeeded: bool,
-    upstream_txid: str = "",
-) -> Order:
-    """应用上游终态事件;重复投递或已过终态时幂等返回,不抛错。
-
-    - delegating → active / failed(正常路径);
-    - 订单已在目标终态 → 幂等成功;
-    - 其他状态(active 等)说明状态被轮询先改过,保持现状并返回。
-    """
-    target = OrderStatus.ACTIVE if succeeded else OrderStatus.FAILED
-    if order.status is target:
-        return order
-    if order.status is not OrderStatus.DELEGATING:
-        return order  # 非期望状态:不流转,由调用方记日志
-    if succeeded:
-        return await activate(session, order.id, upstream_txid=upstream_txid)
-    return await fail(session, order.id)
 
 
 async def reserve_order(
@@ -273,7 +136,6 @@ async def reserve_order(
         recipient_address=recipient_address,
         energy_amount=energy_amount,
         duration_minutes=duration_minutes,
-        duration_hours=duration_minutes // 60 if duration_minutes % 60 == 0 else None,
         price=price,
         max_cost=max_cost,
         status=OrderStatus.DRAFT,

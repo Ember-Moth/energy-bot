@@ -1,7 +1,8 @@
-"""TRONow 终态回调:验签、校验载荷、事务流转与持久化去重。
+"""TRONow 终态回调:验签、校验载荷、唤醒查单与持久化去重。
 
-只有已完成业务处理的投递才确认送达。无效载荷、未匹配订单或流转失败
-均返回非 2xx 且不保存 delivery,让上游能够重投。
+签名回调只负责按上游单号/业务号定位采购尝试并唤醒后台查单,
+不直接流转订单或结算资金。无效载荷、未匹配采购尝试均返回非 2xx
+且不保存 delivery,让上游能够重投。
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from energy_bot.config import TronowSettings
 from energy_bot.models import UpstreamDelivery
-from energy_bot.services import rental
 from energy_bot.services.procurement import wake_tronow
 
 logger = logging.getLogger(__name__)
@@ -156,24 +156,7 @@ class TronowWebhookView:
 
         if await wake_tronow(session, order_id, nested.get("client_order_id")):
             return "applied"
-
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
-        if order is None:
-            return "unmatched"
-        succeeded = expected == "SUCCESS"
-        txid = nested.get("txid")
-        try:
-            await rental.handle_terminal_event(
-                session,
-                order,
-                succeeded=succeeded,
-                upstream_txid=txid if isinstance(txid, str) else "",
-            )
-        except ValueError:
-            # 钱包订单等路径必须走采购结算流程;不据不完整回调结算,让上游重投。
-            logger.warning("TRONow 回调无法完成流转: order=%s", order.id)
-            return "retry"
-        return "applied"
+        return "unmatched"
 
 
 def register_tronow_webhook(

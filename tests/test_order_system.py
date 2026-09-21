@@ -227,7 +227,7 @@ async def test_minutes_product_excludes_tronow(db_factory):
     await assert_money(db_factory, "6", "0", captures=1)
     async with db_factory() as session:
         order = await session.get(Order, order_id)
-        assert order.duration_minutes == 15 and order.duration_hours is None
+        assert order.duration_minutes == 15
     short.state = "expired"
     await due(db_factory, order_id)
     await service.tick()

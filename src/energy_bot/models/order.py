@@ -27,15 +27,13 @@ if TYPE_CHECKING:
 
 
 class OrderStatus(enum.StrEnum):
-    """能量租赁订单状态:下单 → 收款/冻结 → 上游委托 → 完成/失败/退款。"""
+    """能量租赁订单状态:冻结 → 上游委托 → 到账 / 退款。"""
 
     RESERVED = "reserved"  # 用户余额已冻结,等待采购
-    DRAFT = "draft"  # 已创建待支付
-    PAID = "paid"  # 已收款待采购
+    DRAFT = "draft"  # 已创建待冻结,仅在建单瞬间存在
     DELEGATING = "delegating"  # 已提交上游,等待能量到账
     ACTIVE = "active"  # 能量已到账(成功终态;用户随即使用,不管理上游租期)
-    FAILED = "failed"  # 上游执行失败
-    REFUNDED = "refunded"  # 已退款
+    REFUNDED = "refunded"  # 已取消或采购失败,冻结款已退回余额
 
 
 class Order(TimestampMixin, Base):
@@ -58,7 +56,7 @@ class Order(TimestampMixin, Base):
     # 能量接收地址(租赁目标)
     recipient_address: Mapped[str] = mapped_column(String(64), index=True)
     energy_amount: Mapped[int] = mapped_column(Integer)  # 能量数量
-    duration_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 租期(小时)
+    duration_minutes: Mapped[int] = mapped_column(Integer)  # 租期(分钟,唯一时长字段)
     price: Mapped[Decimal] = mapped_column(Numeric(12, 6))  # 订单金额
     status: Mapped[OrderStatus] = mapped_column(
         Enum(OrderStatus, native_enum=False, length=16),
@@ -71,7 +69,7 @@ class Order(TimestampMixin, Base):
     upstream_txid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     delegated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_minutes: Mapped[int] = mapped_column(Integer)
     request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     wallet_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     max_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)

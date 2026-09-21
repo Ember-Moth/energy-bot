@@ -311,7 +311,7 @@ class OrderWorker:
             product = Product(
                 order.recipient_address,
                 order.energy_amount,
-                order.duration_minutes or (order.duration_hours or 0) * 60,
+                order.duration_minutes,
             )
             budget = order.max_cost or order.price
 

@@ -218,7 +218,7 @@ async def test_models_roundtrip(db_factory) -> None:
                 user_id=1,
                 recipient_address="TBase1ExampleAddressDoNotUseXxx",
                 energy_amount=65000,
-                duration_hours=1,
+                duration_minutes=60,
                 price=Decimal("1.5"),
                 status=OrderStatus.DRAFT,
             )
