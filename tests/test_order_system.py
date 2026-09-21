@@ -80,7 +80,6 @@ class FakeProvider:
             self.name + "-" + attempt.business_id,
             self.state,
             self.actual_cost or self.price,
-            datetime.now(TIMEZONE) + timedelta(minutes=20) if self.name == "tronow" else None,
         )
 
     async def submit(self, attempt):
@@ -229,12 +228,12 @@ async def test_minutes_product_excludes_tronow(db_factory):
     async with db_factory() as session:
         order = await session.get(Order, order_id)
         assert order.duration_minutes == 15 and order.duration_hours is None
-        assert order.expires_at is None
     short.state = "expired"
     await due(db_factory, order_id)
     await service.tick()
     async with db_factory() as session:
-        assert (await session.get(Order, order_id)).status is OrderStatus.EXPIRED
+        # ACTIVE 是终态:已结算订单不再因上游状态回填而流转
+        assert (await session.get(Order, order_id)).status is OrderStatus.ACTIVE
     await assert_money(db_factory, "6", "0", captures=1)
 
 
@@ -568,8 +567,6 @@ async def test_real_adapter_http_and_database_lifecycle(db_factory, provider_nam
                 assert attempt.quoted_cost is None
                 order = await session.get(Order, order_id)
                 assert order.status is OrderStatus.ACTIVE
-                if provider_name == "tronbid":
-                    assert order.expires_at is None  # 不把付款截止日期当租赁到期
         finally:
             await provider.close()
 

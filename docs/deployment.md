@@ -91,6 +91,5 @@ WantedBy=multi-user.target
 `ExecStartPre`。用户名及密码可包含空格、`@`、`%` 等字符,迁移直接使用 SQLAlchemy URL
 对象,不会将密码脱敏成 `***` 或经过 ConfigParser 插值。
 
-迁移 `5578d0593605` 为 `(provider, upstream_order_id)` 添加唯一约束。
-已有相同供应商、相同上游单号的重复记录时升级会失败并回滚,需要先人工核对绑定关系;
-迁移不会自动删除或合并订单。不同供应商可以使用相同单号。
+初始迁移为 `(provider, upstream_order_id)` 添加了唯一约束:
+不同供应商可以使用相同单号,但同一供应商不允许重复绑定上游单号。

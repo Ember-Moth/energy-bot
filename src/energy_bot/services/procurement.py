@@ -91,7 +91,7 @@ async def wake_tronow(session: AsyncSession, upstream_id: str, client_id: object
     order = await get_order_for_update(session, attempt.order_id)
     if order is None or order.wallet_state is None:
         return False
-    if order.wallet_state in ("held", "captured") and order.status is not OrderStatus.EXPIRED:
+    if order.wallet_state in ("held", "captured"):
         order.next_run_at = _now()
     return True
 
@@ -273,12 +273,9 @@ class OrderWorker:
             if order.wallet_state not in ("held", "captured"):
                 self._finish(order, None)
                 return
-            if order.wallet_state == "captured" and order.expires_at is not None:
-                if order.expires_at <= _now():
-                    await rental.expire(session, order.id)
-                    self._finish(order, None)
-                else:
-                    self._finish(order, (order.expires_at - _now()).total_seconds())
+            if order.wallet_state == "captured":
+                # 已结算订单是终态(不再管理上游租期),直接出队完结。
+                self._finish(order, None)
                 return
             attempts = list(
                 (
@@ -485,19 +482,13 @@ class OrderWorker:
             else:
                 order.last_error = None
             if order.wallet_state == "captured":
-                if result.state == "expired":
-                    await rental.expire(session, order.id)
-                    self._finish(order, None)
-                else:
-                    self._finish(order, 60)
+                # 已结算订单是终态,结果仅用于回填采购尝试,不再流转。
+                self._finish(order, None)
                 return
             if result.state == "success":
-                await rental.complete_purchase(
-                    session, order, cost=result.cost, expires_at=result.expires_at, txid=result.txid
-                )
+                await rental.complete_purchase(session, order, cost=result.cost, txid=result.txid)
                 attempt.state = "succeeded"
-                delay = (result.expires_at - _now()).total_seconds() if result.expires_at else 60
-                self._finish(order, None if order.status is OrderStatus.EXPIRED else max(0, delay))
+                self._finish(order, None)
             elif result.state == "failed":
                 attempt.state = "failed"
                 self._finish(order, self.settings.poll_seconds)

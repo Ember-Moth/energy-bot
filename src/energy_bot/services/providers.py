@@ -50,7 +50,6 @@ class PurchaseResult:
     upstream_id: str
     state: str
     cost: Decimal
-    expires_at: datetime | None = None
     txid: str = ""
     retry_after: int | None = None
     request_id: str | None = None
@@ -66,15 +65,6 @@ class Provider(Protocol):
     async def submit(self, attempt: PurchaseAttempt) -> PurchaseResult: ...
     async def recover(self, attempt: PurchaseAttempt) -> PurchaseResult: ...
     async def close(self) -> None: ...
-
-
-def _time(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    result = datetime.fromisoformat(value)
-    if result.utcoffset() is None:
-        raise ProviderMismatch("上游时间缺少时区")
-    return result
 
 
 def _json(payload: dict) -> str:
@@ -168,19 +158,10 @@ class TronowProvider:
         ):
             raise ProviderMismatch("TRONow 查询身份或规格不符")
         states = {"SUCCESS": "success", "FAILED": "failed", "REVIEWING": "reviewing"}
-        expiry = _time(result.lease_expires_at)
-        if expiry is None and result.confirmed_at:
-            confirmed = _time(result.confirmed_at)
-            assert confirmed is not None
-            expiry = confirmed + timedelta(hours=1)
-        state = states.get(result.status, "pending")
-        if state == "success" and expiry is None:
-            state = "reviewing"
         return PurchaseResult(
             result.order_id,
-            state,
+            states.get(result.status, "pending"),
             Decimal(result.amount_sun) / SUN,
-            expiry,
             result.txid or "",
             retry_after=result.retry_after,
             request_id=result.request_id,

@@ -20,7 +20,6 @@ _STATUS_TEXT = {
     "reserved": "余额已冻结，等待采购",
     "delegating": "采购确认中",
     "active": "已到账",
-    "expired": "已到期",
     "failed": "采购失败",
     "refunded": "已退回余额",
 }
@@ -148,7 +147,4 @@ async def order_detail(message: Message, command: CommandObject, session: AsyncS
             await message.answer(str(exc))
             return
     await session.commit()
-    expiry = order.expires_at.isoformat() if order.expires_at else "待上游确认"
-    await message.answer(
-        _summary(order) + f"\n接收地址：{order.recipient_address}\n到期时间：{expiry}"
-    )
+    await message.answer(_summary(order) + f"\n接收地址：{order.recipient_address}")

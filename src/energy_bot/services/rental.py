@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -22,7 +22,7 @@ TRON_ADDRESS_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 TRON_ADDRESS_PREFIX = 0x41  # 主网地址解码后的首字节
 
-# 允许的状态跃迁;EXPIRED / REFUNDED 为终态不再迁出
+# 允许的状态跃迁;ACTIVE / REFUNDED 为终态不再迁出。
 ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.DRAFT: frozenset({OrderStatus.PAID, OrderStatus.RESERVED}),
     OrderStatus.RESERVED: frozenset({OrderStatus.DELEGATING, OrderStatus.REFUNDED}),
@@ -30,8 +30,7 @@ ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.DELEGATING: frozenset(
         {OrderStatus.ACTIVE, OrderStatus.FAILED, OrderStatus.REFUNDED}
     ),
-    OrderStatus.ACTIVE: frozenset({OrderStatus.EXPIRED}),
-    OrderStatus.EXPIRED: frozenset(),
+    OrderStatus.ACTIVE: frozenset(),
     OrderStatus.FAILED: frozenset({OrderStatus.REFUNDED}),  # 上游失败后可退款
     OrderStatus.REFUNDED: frozenset(),
 }
@@ -156,40 +155,15 @@ async def activate(
     order_id: int,
     *,
     upstream_txid: str = "",
-    lease_expires_at: datetime | None = None,
-    confirmed_at: datetime | None = None,
 ) -> Order:
-    """按上游到期时间或确认时间激活;迟到且已过期的订单立即流转到 expired。"""
+    """能量到账:delegating → active(成功终态,不管理上游租期)。"""
     order = await _get_locked(session, order_id)
     if order.wallet_state is not None:
         raise RentalError("余额订单必须通过采购结算流程流转")
     ensure_transition(order, OrderStatus.ACTIVE)
-    for value in (lease_expires_at, confirmed_at):
-        if value is not None and value.utcoffset() is None:
-            raise RentalError("上游租期时间必须包含时区")
-    expires_at = lease_expires_at or order.expires_at
-    if expires_at is None and confirmed_at is not None:
-        expires_at = confirmed_at + timedelta(
-            minutes=order.duration_minutes or (order.duration_hours or 0) * 60
-        )
-    if expires_at is None:
-        raise RentalError("缺少上游租期时间,必须查单确认后再激活")
     order.status = OrderStatus.ACTIVE
-    order.expires_at = expires_at
     if upstream_txid:
         order.upstream_txid = upstream_txid
-    if expires_at <= _now():
-        ensure_transition(order, OrderStatus.EXPIRED)
-        order.status = OrderStatus.EXPIRED
-    await session.flush()
-    return order
-
-
-async def expire(session: AsyncSession, order_id: int) -> Order:
-    """租期结束:active → expired(到期回收的后台任务调用)。"""
-    order = await _get_locked(session, order_id)
-    ensure_transition(order, OrderStatus.EXPIRED)
-    order.status = OrderStatus.EXPIRED
     await session.flush()
     return order
 
@@ -233,14 +207,12 @@ async def handle_terminal_event(
     *,
     succeeded: bool,
     upstream_txid: str = "",
-    lease_expires_at: datetime | None = None,
-    confirmed_at: datetime | None = None,
 ) -> Order:
     """应用上游终态事件;重复投递或已过终态时幂等返回,不抛错。
 
     - delegating → active / failed(正常路径);
     - 订单已在目标终态 → 幂等成功;
-    - 其他状态(active / expired 等)说明状态被轮询先改过,保持现状并返回。
+    - 其他状态(active 等)说明状态被轮询先改过,保持现状并返回。
     """
     target = OrderStatus.ACTIVE if succeeded else OrderStatus.FAILED
     if order.status is target:
@@ -248,13 +220,7 @@ async def handle_terminal_event(
     if order.status is not OrderStatus.DELEGATING:
         return order  # 非期望状态:不流转,由调用方记日志
     if succeeded:
-        return await activate(
-            session,
-            order.id,
-            upstream_txid=upstream_txid,
-            lease_expires_at=lease_expires_at,
-            confirmed_at=confirmed_at,
-        )
+        return await activate(session, order.id, upstream_txid=upstream_txid)
     return await fail(session, order.id)
 
 
@@ -350,7 +316,6 @@ async def begin_purchase(session: AsyncSession, order: Order, provider: str) -> 
     order.upstream_order_id = None
     order.purchase_cost = None
     order.upstream_txid = None
-    order.expires_at = None
     order.delegated_at = _now()
     await session.flush()
 
@@ -360,16 +325,13 @@ async def complete_purchase(
     order: Order,
     *,
     cost: Decimal,
-    expires_at: datetime | None,
     txid: str = "",
 ) -> None:
-    """受订单行锁保护的采购成功与扣款;TronBid 可暂缺可信到期时间。"""
+    """受订单行锁保护的采购成功与扣款。"""
     if order.wallet_state == "captured":
         return
     if order.wallet_state != "held":
         raise RentalError("已释放的订单不能再次扣款")
-    if expires_at is not None and expires_at.utcoffset() is None:
-        raise RentalError("到期时间必须包含时区")
     ensure_transition(order, OrderStatus.ACTIVE)
     await wallet.settle(
         session, user_id=order.user_id, order_id=order.id, amount=order.price, capture=True
@@ -377,11 +339,7 @@ async def complete_purchase(
     order.wallet_state = "captured"
     order.purchase_cost = cost
     order.status = OrderStatus.ACTIVE
-    order.expires_at = expires_at
     order.upstream_txid = txid or None
-    if expires_at is not None and expires_at <= _now():
-        ensure_transition(order, OrderStatus.EXPIRED)
-        order.status = OrderStatus.EXPIRED
     await notify_order(
         session, order, "fulfilled", f"订单 #{order.id} 能量已到账，已扣款 {order.price:f} TRX。"
     )

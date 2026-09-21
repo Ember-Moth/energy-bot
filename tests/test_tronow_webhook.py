@@ -6,7 +6,6 @@ import hmac
 import json
 import time
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -18,7 +17,6 @@ from sqlalchemy import func, select
 from energy_bot.config import TIMEZONE, TronowSettings
 from energy_bot.models import Order, OrderStatus, UpstreamDelivery, User
 from energy_bot.services import rental
-from energy_bot.services.upstream.tronow import TronowClient, TronowOrderStatus
 from energy_bot.web.tronow import TronowWebhookView, verify_signature
 
 WEBHOOK_SECRET = "whsec-test"
@@ -211,7 +209,6 @@ async def test_webhook_activates_order_and_dedups(webhook_client) -> None:
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
         assert order is not None and order.status is OrderStatus.ACTIVE
         assert order.upstream_txid == "tx-hash-1"
-        assert order.expires_at is not None
         deliveries = len((await session.execute(select(UpstreamDelivery))).scalars().all())
     assert deliveries == 1
 
@@ -417,66 +414,30 @@ async def test_signed_non_utf8_callback_is_bad_request() -> None:
         assert response.status == 400
 
 
-@pytest.mark.parametrize("expired", [False, True])
-async def test_callback_preserves_authoritative_expiry(webhook_client, expired: bool) -> None:
-    http, factory = webhook_client
-    payload = json.loads(_callback_body())
-    expiry = datetime.now(TIMEZONE) + timedelta(minutes=-10 if expired else 10)
-    payload["data"]["lease_expires_at"] = expiry.isoformat()
-    response = await _post(http, json.dumps(payload).encode(), "lease-dlv")
-    assert response.status == 200
-    async with factory() as session:
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.expires_at == expiry
-        assert order.status is (OrderStatus.EXPIRED if expired else OrderStatus.ACTIVE)
-
-
-async def test_missing_lease_queries_then_retries_without_consuming(
-    webhook_client,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_callback_without_lease_field_activates(webhook_client) -> None:
+    """业务不管理上游租期:回调缺少租期字段也能直接激活,不再需要查单补租期。"""
     http, factory = webhook_client
     payload = json.loads(_callback_body())
     del payload["data"]["lease_expires_at"]
-    body = json.dumps(payload).encode()
-    expiry = datetime.now(TIMEZONE) + timedelta(minutes=20)
-    query = AsyncMock(
-        side_effect=[
-            TimeoutError(),
-            SimpleNamespace(
-                order_id="ord_x1",
-                status=TronowOrderStatus.SUCCESS,
-                lease_expires_at=expiry.isoformat(),
-                confirmed_at=None,
-            ),
-        ]
-    )
-    monkeypatch.setattr(TronowClient, "get_order", query)
-    response = await _post(http, body, "retry-lease")
-    assert response.status == 503
-    async with factory() as session:
-        assert await session.get(UpstreamDelivery, "retry-lease") is None
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING
-    response = await _post(http, body, "retry-lease")
+    response = await _post(http, json.dumps(payload).encode(), "no-lease")
     assert response.status == 200
-    assert query.await_count == 2
     async with factory() as session:
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.expires_at == expiry
+        assert order is not None and order.status is OrderStatus.ACTIVE
 
 
-async def test_callback_uses_confirmation_time(webhook_client) -> None:
+@pytest.mark.parametrize("expiry", [123, "bad-time", "2026-09-20T12:00:00"])
+async def test_lease_field_is_ignored(webhook_client, expiry: Any) -> None:
+    """回调里的租期字段无论格式都被忽略,照常激活并确认投递。"""
     http, factory = webhook_client
     payload = json.loads(_callback_body())
-    del payload["data"]["lease_expires_at"]
-    confirmed = datetime.now(TIMEZONE) - timedelta(minutes=40)
-    payload["data"]["confirmed_at"] = confirmed.isoformat()
-    response = await _post(http, json.dumps(payload).encode(), "confirmed-dlv")
+    payload["data"]["lease_expires_at"] = expiry
+    response = await _post(http, json.dumps(payload).encode(), "ignored-lease")
     assert response.status == 200
     async with factory() as session:
+        assert await session.get(UpstreamDelivery, "ignored-lease") is not None
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.expires_at == confirmed + timedelta(hours=1)
+        assert order is not None and order.status is OrderStatus.ACTIVE
 
 
 async def test_concurrent_callbacks_apply_once(webhook_client) -> None:
@@ -489,19 +450,6 @@ async def test_concurrent_callbacks_apply_once(webhook_client) -> None:
         assert count == 1
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
         assert order is not None and order.status is OrderStatus.ACTIVE
-
-
-@pytest.mark.parametrize("expiry", [123, "bad-time", "2026-09-20T12:00:00"])
-async def test_invalid_lease_is_not_consumed(webhook_client, expiry: Any) -> None:
-    http, factory = webhook_client
-    payload = json.loads(_callback_body())
-    payload["data"]["lease_expires_at"] = expiry
-    response = await _post(http, json.dumps(payload).encode(), "invalid-lease")
-    assert response.status == 503
-    async with factory() as session:
-        assert await session.get(UpstreamDelivery, "invalid-lease") is None
-        order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id="ord_x1")
-        assert order is not None and order.status is OrderStatus.DELEGATING
 
 
 async def test_chunked_body_size_limit() -> None:

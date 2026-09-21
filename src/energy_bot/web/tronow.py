@@ -1,6 +1,6 @@
-"""TRONow 终态回调:验签、校验载荷、确认租期、事务流转与持久化去重。
+"""TRONow 终态回调:验签、校验载荷、事务流转与持久化去重。
 
-只有已完成业务处理的投递才确认送达。无效载荷、未匹配订单或查单失败
+只有已完成业务处理的投递才确认送达。无效载荷、未匹配订单或流转失败
 均返回非 2xx 且不保存 delivery,让上游能够重投。
 """
 
@@ -12,22 +12,17 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
 from typing import Any
 
-from aiohttp import ClientError, web
+from aiohttp import web
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from energy_bot.config import RentalSettings, TronowSettings
-from energy_bot.models import OrderStatus, UpstreamDelivery
+from energy_bot.config import TronowSettings
+from energy_bot.models import UpstreamDelivery
 from energy_bot.services import rental
 from energy_bot.services.procurement import wake_tronow
-from energy_bot.services.rental import RentalError
-from energy_bot.services.upstream.tronow import TronowApiError, TronowClient, TronowOrderStatus
-from energy_bot.services.upstream_cache import cache_key
-from energy_bot.services.upstream_gate import TronowGate, UpstreamDeferred
 
 logger = logging.getLogger(__name__)
 
@@ -62,17 +57,6 @@ def parse_timestamp(header: str) -> int | None:
     return int(header)
 
 
-def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError("租期时间必须是带时区的 ISO 8601 字符串")
-    parsed = datetime.fromisoformat(value)
-    if parsed.utcoffset() is None:
-        raise ValueError("租期时间缺少时区")
-    return parsed
-
-
 class TronowWebhookView:
     """持有配置与会话工厂;aiohttp handler 形式注册到 app。"""
 
@@ -83,16 +67,6 @@ class TronowWebhookView:
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
-        self._gate = TronowGate(
-            session_factory,
-            cache_key(
-                "tronow",
-                settings.account_scope or "default-merchant",
-            ),
-            RentalSettings(),
-            request_limit=settings.request_limit,
-            order_limit=settings.order_limit,
-        )
 
     def register(self, app: web.Application, path: str) -> None:
         app.router.add_post(path, self.handle)
@@ -163,26 +137,6 @@ class TronowWebhookView:
         )
         return existing is not None
 
-    async def _lease_expiry(self, order_id: str, nested: dict[str, Any]) -> datetime:
-        """优先使用签名载荷的租期时间;缺失时以只读订单查询补全。"""
-        expires_at = _parse_datetime(nested.get("lease_expires_at"))
-        if expires_at is not None:
-            return expires_at
-        confirmed_at = _parse_datetime(nested.get("confirmed_at"))
-        if confirmed_at is None:
-            async with TronowClient(self._settings, gate=self._gate) as client:
-                snapshot = await client.get_order(order_id)
-            if snapshot.order_id != order_id or snapshot.status is not TronowOrderStatus.SUCCESS:
-                raise RentalError("查单结果尚未确认该订单成功")
-            expires_at = _parse_datetime(snapshot.lease_expires_at)
-            if expires_at is not None:
-                return expires_at
-            confirmed_at = _parse_datetime(snapshot.confirmed_at)
-        if confirmed_at is None:
-            raise RentalError("上游尚未返回租期时间")
-        # TRONow 当前产品固定为 1h,不能按本地通知到达时间重新起算。
-        return confirmed_at + timedelta(hours=1)
-
     async def _apply_event(self, session: AsyncSession, event: str, payload: dict[str, Any]) -> str:
         data = payload.get("data")
         if data is not None and not isinstance(data, dict):
@@ -206,38 +160,18 @@ class TronowWebhookView:
         order = await rental.get_by_upstream(session, provider="tronow", upstream_order_id=order_id)
         if order is None:
             return "unmatched"
-        local_id = order.id
         succeeded = expected == "SUCCESS"
         txid = nested.get("txid")
         try:
-            expires_at = None
-            if succeeded and order.status is OrderStatus.DELEGATING:
-                # 旧订单补查也参与商户限流;等待额度/网络前先释放订单锁和连接。
-                await session.rollback()
-                expires_at = await self._lease_expiry(order_id, nested)
-                order = await rental.get_by_upstream(
-                    session, provider="tronow", upstream_order_id=order_id
-                )
-                if order is None:
-                    return "unmatched"
             await rental.handle_terminal_event(
                 session,
                 order,
                 succeeded=succeeded,
                 upstream_txid=txid if isinstance(txid, str) else "",
-                lease_expires_at=expires_at,
             )
-        except (
-            TypeError,
-            ValueError,
-            OverflowError,
-            ClientError,
-            TimeoutError,
-            TronowApiError,
-            UpstreamDeferred,
-        ):
-            # 不记录异常原文,避免 HTTP 异常携带凭据或不受控响应内容。
-            logger.warning("TRONow 回调无法确认租期或完成流转: order=%s", local_id)
+        except ValueError:
+            # 钱包订单等路径必须走采购结算流程;不据不完整回调结算,让上游重投。
+            logger.warning("TRONow 回调无法完成流转: order=%s", order.id)
             return "retry"
         return "applied"
 

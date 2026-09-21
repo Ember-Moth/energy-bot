@@ -27,14 +27,13 @@ if TYPE_CHECKING:
 
 
 class OrderStatus(enum.StrEnum):
-    """能量租赁订单状态:下单 → 收款 → 上游委托 → 租期进行 → 终态。"""
+    """能量租赁订单状态:下单 → 收款/冻结 → 上游委托 → 完成/失败/退款。"""
 
     RESERVED = "reserved"  # 用户余额已冻结,等待采购
     DRAFT = "draft"  # 已创建待支付
     PAID = "paid"  # 已收款待采购
     DELEGATING = "delegating"  # 已提交上游,等待能量到账
-    ACTIVE = "active"  # 能量已到账,租期进行中
-    EXPIRED = "expired"  # 租期结束
+    ACTIVE = "active"  # 能量已到账(成功终态;用户随即使用,不管理上游租期)
     FAILED = "failed"  # 上游执行失败
     REFUNDED = "refunded"  # 已退款
 
@@ -71,7 +70,6 @@ class Order(TimestampMixin, Base):
     upstream_order_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     upstream_txid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     delegated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)

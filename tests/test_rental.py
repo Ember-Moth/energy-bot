@@ -1,7 +1,6 @@
 """租赁状态机单元测试(无数据库)+ 完整生命周期集成测试(需真实 PG)。"""
 
 import os
-from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -46,7 +45,7 @@ def test_denied_transitions_raise() -> None:
 
 
 def test_terminal_states_have_no_exits() -> None:
-    for terminal in (OrderStatus.EXPIRED, OrderStatus.REFUNDED):
+    for terminal in (OrderStatus.ACTIVE, OrderStatus.REFUNDED):
         assert rental.ALLOWED_TRANSITIONS[terminal] == frozenset()
 
 
@@ -118,23 +117,16 @@ async def test_rental_lifecycle(db_factory) -> None:
         assert order.status is OrderStatus.DELEGATING
         assert order.delegated_at is not None
 
-        order = await rental.activate(
-            session, order_id, upstream_txid="tx-123", confirmed_at=rental._now()
-        )
+        order = await rental.activate(session, order_id, upstream_txid="tx-123")
         assert order.status is OrderStatus.ACTIVE
         assert order.upstream_txid == "tx-123"
-        assert order.expires_at is not None
         assert order.delegated_at is not None
-        # 租期从到账时刻起算(激活晚于委托,故差值 ≥ 2 小时)
-        assert order.expires_at - order.delegated_at >= timedelta(hours=2)
         await session.commit()
 
-    # ACTIVE 不能直接退款;到期回收转 expired
+    # ACTIVE 是终态:不能直接退款
     async with factory() as session:
         with pytest.raises(rental.InvalidTransitionError):
             await rental.refund(session, order_id)
-        order = await rental.expire(session, order_id)
-        assert order.status is OrderStatus.EXPIRED
         await session.commit()
 
     # 第二单走售后路径:委托上游 → 执行失败 → 退款
@@ -170,10 +162,10 @@ async def test_rental_lifecycle(db_factory) -> None:
         assert [o.id for o in mine] == [failed_id, order_id]  # 按创建时间倒序
 
 
-@pytest.mark.parametrize("expired", [False, True])
-async def test_delayed_activation_uses_upstream_expiry(db_factory, expired: bool) -> None:
+async def test_activation_needs_no_lease_expiry(db_factory) -> None:
+    """业务不管理上游租期:激活不需要任何到期时间,ACTIVE 即为终态。"""
     async with db_factory() as session:
-        await users_repo.upsert_user(session, user_id=1, first_name="租期测试", language_code="zh")
+        await users_repo.upsert_user(session, user_id=1, first_name="激活测试", language_code="zh")
         order = await rental.place_order(
             session,
             user_id=1,
@@ -186,14 +178,9 @@ async def test_delayed_activation_uses_upstream_expiry(db_factory, expired: bool
         await rental.start_delegation(
             session, order.id, provider="tronow", upstream_order_id="ord_time"
         )
-        with pytest.raises(rental.RentalError, match="租期时间"):
-            await rental.activate(session, order.id)
-        assert order.status is OrderStatus.DELEGATING
-        expiry = rental._now() + timedelta(minutes=-20 if expired else 20)
-        await rental.activate(session, order.id, lease_expires_at=expiry)
+        await rental.activate(session, order.id)
         await session.commit()
-        assert order.expires_at == expiry
-        assert order.status is (OrderStatus.EXPIRED if expired else OrderStatus.ACTIVE)
+        assert order.status is OrderStatus.ACTIVE
 
 
 async def test_upstream_identity_is_scoped_and_unique(db_factory) -> None:

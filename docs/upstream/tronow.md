@@ -73,15 +73,14 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 2. 时间戳窗口校验(过期拒绝);
 3. body 大小上限;
 4. **delivery ID 持久化去重**(回调会重复投递,需要一张去重表);
-5. `2xx` 只在**业务处理与去重记录共同提交之后**返回;未知/缺字段载荷、事件与状态矛盾返回 422,不记录 delivery;未匹配订单或暂时无法确认租期返回 503,允许重投;
+5. `2xx` 只在**业务处理与去重记录共同提交之后**返回;未知/缺字段载荷、事件与状态矛盾返回 422,不记录 delivery;未匹配订单或流转被拒返回 503,允许重投;
 6. webhook 只覆盖两个终态;`CONFIRMING` / `REVIEWING` 仍需轮询兜底。
 
 当前接收端只接受 `order.succeeded` + `SUCCESS` 或 `order.failed` + `FAILED`。
 支持订单字段直接位于根对象或 `data` 对象;若根对象含 `event`,必须与签名头一致。
 时间戳当前按 Unix 整数秒、±5 分钟校验;上游材料未明确单位,真实联调仍需确认。
-成功通知优先使用带时区的 `lease_expires_at`,其次使用 `confirmed_at + 1h`。
-两者均缺失时只读查单补全;查单失败、状态未成功或仍无时间时返回 503,不确认送达。
-迟到通知的租期已结束时直接经状态机流转到 `expired`,不会从接收时间重新延长租期。
+成功通知中的 `lease_expires_at` / `confirmed_at` 字段被忽略:业务不管理上游租期,
+能量到账即成功终态,回调无需确认租期也直接激活。
 
 回调 body 携带订单字段(`amount_sun` 为锁定金额);**完整 payload schema 未在材料中给出**,首次联调时以真实回调为准核对并回填本文档。
 
@@ -108,7 +107,7 @@ v1=hex(HMAC-SHA256(webhook_secret, timestamp + "." + delivery_id + "." + event_i
 | `order_id` | `Order.upstream_order_id` |
 | 交易哈希 | `Order.upstream_txid` |
 | `PROCESSING` / `CONFIRMING` | `delegating` |
-| `SUCCESS` | `active` / 已过期则 `expired`;采用上游到期时间或确认时间 + 1h |
+| `SUCCESS` | `active`(成功终态,不管理上游租期) |
 | `FAILED` | `failed` |
 | `REVIEWING` | 保持 `delegating` + 告警,转人工 |
 | `amount_sun` | `Decimal` 换算,`price` 以 TRX 记 |
@@ -156,7 +155,7 @@ scope=requests 暂停全部请求。未知范围、网关 429 和 503 限流服�
 
 HTTP 层关闭 aiohttp 的隐式连接重试,避免复用旧 nonce 或绕过本地计额。
 每次恢复都由订单工作流发起新 HTTP 尝试。受理成功响应的 Retry-After 也会约束下一次查单。
-新增迁移 e42447497660 保存窗口历史、配额观测及采购请求诊断;部署前执行 Alembic 升级。
+窗口历史、配额观测及采购请求诊断由 `upstream_throttles` 表承载;部署前执行 Alembic 升级。
 
 升级时各实例须统一新的商户分组与配置;混用旧版按 key 分桶的消费者无法共享本地额度。
 `amount_sun` 是不可变锁定金额,并不表示 FAILED 订单仍有净支出;财务汇总须结合终态,

@@ -83,7 +83,7 @@ uv run python scripts/benchmark_orders.py --mode multi --orders 80 --delay-ms 10
 
 ## 部署与容量边界
 
-先执行 `alembic upgrade head`,新增迁移 `ac2fb88df8cf` 建立缓存、共享限流和队列索引。
+先执行 `alembic upgrade head` 建立完整 schema(含缓存、共享限流和队列索引)。
 默认数据库连接池仍为常驻 5、最多 15;由于等待网络期间释放连接,无需直接按 HTTP
 并发数扩大数据库连接池。增加实例时应核对实例总连接上限及上游商户配额。
 
