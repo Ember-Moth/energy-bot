@@ -1,6 +1,6 @@
 # GMPay(epusdt)收款接入方案
 
-状态:待评审(v3,单币种 TRX)。协议依据:epusdt 仓库 wiki/API.md + 本地源码 `/Users/tschen/epusdt`(已核实,见"源码确证"一节)。
+状态:已实现单币种 TRX 充值及原单恢复,后台充值轮询尚未实现。协议依据:epusdt 仓库 wiki/API.md + 本地源码(已核实,见"源码确证"一节)。
 
 ## 目标与边界
 
@@ -27,7 +27,7 @@
 **形态 A(推荐):网关 currency 直接设为 `trx`**。`currency` 字段无枚举校验,
 而 `GetRateForCoin(coin, base)` 有 **coin == base → 汇率 1** 的短路(`rate.go:82`)。
 下单 `currency="trx"` + `token="trx"` 时,`amount` 直接就是 TRX 数量,
-actual_amount 精确等于下单金额——**汇率环节彻底消失,金额语义端到端闭环**。
+实际应付金额还可能因网关交易锁而微增,须以响应或已验签回调中的 actual_amount 为准。
 
 **形态 B:法币币种(usd)+ 汇率配置**。`usd_per_trx` 把用户想充的 TRX 数换成
 下单法币金额,网关再按它自己的汇率折算回 TRX;两侧汇率若不严格一致,
@@ -50,7 +50,7 @@ payment:
     timeout_seconds: 10
 ```
 
-`currency="trx"` 时下单 `amount` 直接是 TRX 数量,actual_amount 与其精确相等;
+`currency="trx"` 时下单 `amount` 直接是 TRX 数量,actual_amount 为网关最终应付金额;
 若网关侧限制 currency 取值(退路形态 B),改配 `usd` 并增加 `usd_per_trx` 估算汇率。
 新增配置项按硬性约定同步四处:config.py、config.example.yaml、docs/configuration.md、测试。
 
@@ -73,7 +73,7 @@ payment:
 | `user_id` | FK users.id |
 | `order_id` | 商户单号(≤32 字符,全平台唯一,唯一索引),如 `dep-{user_id}-{uuid8}` |
 | `trade_id` | GMPay 平台单号,回调对账键(唯一索引,可空:下单失败时无) |
-| `fiat_amount` | 下单法币金额(Numeric(12,6)) |
+| `fiat_amount` | 原始下单金额(Numeric(20,8),业务校验最多 6 位小数) |
 | `expected_amount` | 应付 TRX(Numeric(20,8),下单响应 actual_amount,**展示给用户的金额**) |
 | `receive_address` | 收款地址 |
 | `status` | created / paid / expired / failed |
@@ -86,9 +86,10 @@ payment:
 
 ### 4. 金额口径(核心决策)
 
-- **闭环**:形态 A 下,用户输入的 TRX 数量 = 下单 amount = 网关 actual_amount = 入账金额,全链路同一数值,无任何折算;
-- **展示**:用户看到的就是他输入的 TRX 数量(以网关返回 actual_amount 复核展示,防御形态 B 退化);
-- **入账**:回调 `actual_amount` 必须等于订单 `expected_amount`(epusdt 精确匹配保证,双侧校验防御),相等则**按 `expected_amount` 入账**;不一致 → 告警 + 503 转人工,**不入账**。
+- **闭环**:形态 A 下,用户输入的 TRX 数量即下单 amount;网关 actual_amount 是最终应付与入账金额,无汇率折算;
+- **展示**:用户按网关最终 actual_amount 转账,页面与入账金额保持一致;
+- **入账**:已知网关单号时,回调 `actual_amount` 必须等于订单 `expected_amount`,相等则按 `expected_amount` 入账;不一致 → 告警、标记 failed 并应答 ok 转人工,不入账。
+- **未知下单结果恢复**:原始下单意图先提交;回调验签后校验 PID、商户单号、原始 amount、TRX 币种及收款地址,由回调恢复 trade_id 和 expected_amount,再入账。金额最多 6 位小数。
 
 ### 5. Webhook 接收端 `web/gmpay.py`(复刻 web/tronow.py 的纪律)
 
@@ -99,9 +100,9 @@ payment:
 3. 解析 JSON(epusdt 签名覆盖参数字典而非原始字节,故先解析后验签——与 TRONow 相反的顺序,协议设计如此);
 4. 验签:按 pid 查 secret → 规范化参数 → HMAC-SHA256 → `hmac.compare_digest`;失败 401;
 5. `status != 2` → 应答 `ok` 但不处理(防御,正常不会收到);
-6. 按 `trade_id` 行锁取 deposit_orders;找不到 → 503 换重投(同 TRONow unmatched 语义);
+6. 校验 PID,按 `order_id` 行锁取并刷新 deposit_orders,复核原始 amount 与已有 trade_id;本地无单 → 503 换重投。若 trade_id 尚为空,恢复已验签的网关身份和应付金额;
 7. 同事务:金额一致性校验(actual_amount == expected_amount,另校验回调 `token` 为 trx)→ `wallet.credit(user_id, expected_amount, reference=f"gmpay:{trade_id}")` → 订单 status=paid、记录 txid → 插 `upstream_deliveries` 去重行 → 提交;
-8. 重复 trade_id → 去重命中,直接应答 `ok`;
+8. 重复 trade_id 仍在行锁内校验原单,允许恢复已确认支付的过期单、补齐缺失交易号;已 paid 不重复加款或改入账时间,已有凭证冲突返回 400。delivery 记录用唯一键冲突忽略,不因重投回滚已完成的凭证补齐;
 9. 应答体严格为纯文本 `ok`(epusdt 只认 `ok`/`success`,且要求 HTTP 200)。
 
 与 TRONow webhook 的三处刻意差异:无时间戳窗口(协议没有);验签在 JSON 解析后;应答体是 `ok` 而非 JSON。
@@ -111,16 +112,20 @@ payment:
 - `/deposit` → 展示用法;
 - `/deposit TRX数量`:
   - 创建 deposit_orders 记录(expected_amount = 用户输入的 TRX 数量);
-  - 调 GMPay 下单(amount 同值,currency=trx),同一事务提交后回复:收款地址、**应付 TRX**(以网关返回 actual_amount 复核展示)、有效期、付款提示;
+  - 先提交原单,再在事务外调 GMPay 下单(amount 同值,currency=trx),行锁合并响应并提交后回复:收款地址、应付 TRX 与付款提示;
   - 回复文案强调**转账金额必须与显示完全一致**(epusdt 靠 `地址+金额` 精确匹配,多付少付都静默过期);
 - `/deposit_status 单号` → 本地状态 + 主动 `check_status` 对账一次(回调延迟时的用户自助恢复)。
 
-下单请求号:`request_key=f"tg:{chat_id}:{message_id}"` 模式沿用,重复消息幂等复用。
+商户单号由 `user_id/chat_id/message_id` 的 SHA-256 摘要生成,固定 32 字符,
+复用 `order_id` 唯一约束。只有首次插入者请求网关,并发或重投消息均复用原单。
+未知结果不重发 POST;返回本地充值单号和待核对提示,不展示未经确认的收款地址。
 
 ### 7. 恢复与兜底
 
-- 回调丢失:轮询兜底——复用现有订单工作器模式,对 `created` 超过 N 分钟的充值单定期 `check_status`,发现已支付而本地未入账时走与回调相同的入账路径(reference 幂等保证不重复入账);
-- 过期:网关状态 3 → 本地标记 expired,用户重新下单即可;资金未动,无需退款逻辑;
+- 回调丢失且已有 trade_id:用户用 `/deposit_status` 主动查询恢复入账。查询返回后重新获取行锁并刷新记录,不覆盖并发回调写入的终态;后台充值轮询尚未实现;
+- 下单超时/断连/取消:保留已提交意图,等待已验签成功回调按商户单号恢复。没有响应和回调时,管理员需按商户单号核对网关记录;网关重复商户单号只报错,不能当作幂等恢复接口;
+- 过期:只有行锁内仍为 created 时才根据网关状态 3 标记 expired,不会覆盖已入账订单;过期后仍可根据可信成功回调或查询结果入账,须通过原单、金额与币种校验;
+- 查询先入账、回调后到:回调补记链上交易号,保留最初入账时间,钱包与 delivery 均保持幂等。旧 delivery 已存在也不跳过原单校验,可恢复旧逻辑误确认的过期付款;
 - 金额/币种不符的回调:不丢弃——告警日志 + 订单标 `failed`,人工核对(与 REVIEWING 同一通道)。
 
 ### 8. 测试计划

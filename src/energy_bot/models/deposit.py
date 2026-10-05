@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class DepositStatus(enum.StrEnum):
     """充值单状态:下单 → 网关确认到账 / 过期 / 异常。"""
 
-    CREATED = "created"  # 已下单待支付
+    CREATED = "created"  # 下单意图已落库;无网关单号时待核对,有单号时待支付
     PAID = "paid"  # 已到账并入账
     EXPIRED = "expired"  # 网关侧过期未支付
     FAILED = "failed"  # 金额/币种不符等异常,转人工核对
@@ -34,7 +34,7 @@ class DepositOrder(TimestampMixin, Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     # 商户单号(dep- 前缀),全平台唯一
     order_id: Mapped[str] = mapped_column(String(32), unique=True)
-    # GMPay 平台单号;回调对账键,下单失败时为空
+    # GMPay 平台单号;下单尚未确认时为空,可经验签回调按商户单号恢复
     trade_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     # 下单金额(currency=trx 时即用户输入的 TRX 数量)
     fiat_amount: Mapped[Decimal] = mapped_column(Numeric(20, 8))
